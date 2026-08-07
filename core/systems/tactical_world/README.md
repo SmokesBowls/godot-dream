@@ -393,6 +393,181 @@ flagged rather than silently guessed.
     before testing -- this is now testing the real jamb wall, not an
     accidental one.
 
+28. **Item 26's `floori(x+0.5)` fix removed the ORIGIN-relative
+    asymmetry but replaced it with a DIRECTION-relative one, uniform
+    across the whole map.** Reported precisely again: Up/Left took 2
+    steps to flip the highlighted cell (correct), but Down/Right flipped
+    after just 1 step and landed the player on the new cell's FAR edge
+    instead of its near one. Root cause: `floori(x+0.5)` always assigns
+    a cell's "lower" boundary to itself and its "upper" boundary to the
+    next cell out -- a uniform rule, but still a STATELESS one, and any
+    stateless point->cell formula necessarily picks one side of every
+    boundary tie, which reads as correct approaching from one direction
+    and wrong from the other. This isn't fixable by choosing a
+    different rounding formula -- no single stateless rule can make
+    both directions "win" the same tie. Fixed with STICKY tracking in
+    `debug_grid_overlay.gd` (`_sticky_current_cell()`): keep reporting
+    the last cell shown, and only flip once the player is STRICTLY
+    (not tied) closer to a different cell's center. Verified all 4
+    cardinal directions now behave identically: step 1 to a boundary
+    never flips anything, step 2 flips and lands exactly on the new
+    cell's center. `player.world_to_cell()` itself was NOT reverted --
+    it's still correct and necessary for item 22's wall-collision fix,
+    which never depends on tie-breaking (the nudge steers every
+    legality check away from ties before this function ever sees them).
+    Stickiness is a display-only concern, scoped to the debug overlay,
+    not applied to movement/collision logic.
+
+29. **MOVEMENT AT BLOCKED CELL EDGES: standing exactly at a wall's
+    touching face was reversed on purpose.** Real playtest report: the
+    actor has a real capsule radius (0.4m), and resting exactly at a
+    boundary position (e.g. x=9.5 next to a wall spanning [9.5,10.5))
+    put roughly half that radius bodily inside the wall -- geometrically
+    fine for the zero-radius point items 22-23's fix reasoned about, not
+    for an actor with real size. `request_move()` now looks one more
+    half-step PAST any boundary-landing target, in the same direction,
+    and rejects the boundary step itself if that further position is
+    blocked -- so the actor stops at the last open CELL CENTER instead
+    (`_is_cell_boundary()` / the new check in `request_move()`).
+    Center-landing steps (the other half of every pair) are unaffected;
+    open-to-open movement anywhere away from a wall is unaffected.
+    Deliberately does NOT touch the sticky debug-highlight logic (item
+    28) or `world_to_cell()`'s tie-breaking (item 26) -- this is a
+    movement-legality decision made in `request_move()`, upstream of
+    anything the debug overlay visualizes, exactly as specified.
+    Directly reverses the specific outcome (not the mechanism) of items
+    22-23's fix for the blocked-neighbor case -- `_collision_test_point`
+    is still correct and necessary (it's what makes touching a wall
+    correctly NOT get rejected on ties when the far side IS open); this
+    is a deliberate, additional layer on top of it, not a revert.
+    Verified symmetric on both wall sides, against a solid object
+    (chest) as well as a wall, for diagonal boundary crossings, and that
+    repeated attempts at the stop point never creep forward. Three
+    existing tests had hardcoded the old touching-face-reachable
+    expectation (`verify_boundary_fix.gd`, `verify_full_validation.gd`,
+    `verify_doorway_edges.gd`) -- all three updated with the reversal
+    documented in place, not silently changed.
+
+30. **Movement legality was rewritten from float-rounding to exact
+    integer arithmetic (`step_to_cell()`), replacing the entire lineage
+    of tie-breaking patches (items 22, 26, 28-29).** Not a fourth patch
+    on the same rounding function -- a structural fix. Every prior bug
+    in this series came from the same root cause: `step_distance` is
+    exactly half of `cell_size`, so converting a step position to a
+    world float and dividing by `cell_size` produces an EXACT tie on
+    every other step -- not a rare edge case, the common one -- and any
+    stateless rule for breaking that tie (`roundi()`, `floori(x+0.5)`,
+    an epsilon nudge) necessarily favors one side over the other
+    *somewhere*, which is exactly why each fix in turn surfaced a new
+    case the same way. `current_step` is always an exact integer, and
+    `cell_size`/`step_distance` have a fixed integer ratio -- so "which
+    cell is this" can be answered with true integer floor division
+    (`_floor_div`/`_floor_mod`, verified against GDScript's actual `/`
+    and `%` behavior on negative operands empirically before use, not
+    assumed) instead of dividing floats and rounding. Integer division
+    has no ties, so there is nothing left to break asymmetrically.
+    `_collision_test_point()` (the epsilon nudge) and the float-based
+    `_is_cell_boundary()` were removed outright, not just replaced --
+    once the wall/object checks work in exact step space via
+    `step_to_cell()`, there's no longer a tie for either of them to
+    exist for. `world_to_cell()` (float-based) stays, scoped to what it
+    was always actually needed for: arbitrary continuous positions that
+    were never on the step lattice to begin with (mid-glide
+    `current_cell()`, hand-placed object positions, the debug overlay,
+    interaction line-of-sight).
+    Verified two ways: (1) every existing regression suite from this
+    entire bug lineage re-passes byte-for-byte identically (28/28,
+    17/17, 16/16, 12/12, 13/14 with the one pre-existing unrelated
+    stale test) -- the refactor changes HOW the answer is computed, not
+    WHAT the answer is; (2) a NEW exhaustive sweep
+    (`verify_exhaustive_cell_mapping.gd`) that a float-based approach
+    could never cheaply support -- 2000+ step positions spanning the
+    origin in both directions, confirming every cell owns exactly the
+    same count of steps with zero exceptions, boundary detection agrees
+    with cell ownership everywhere, and advancing one full cell always
+    changes the cell index by exactly 1 in either direction. This is
+    the actual end of the bug class, not a fourth instance of finding
+    where the previous fix's tie-break still lost.
+
+31. **The blocked-cell-edge fix (item 29) only checked the axis the
+    CURRENT move was advancing along -- a real, reported "still walking
+    into the wall" bug got through it.** Reproduced exactly from two
+    user-supplied screenshots (a live coordinate HUD added specifically
+    for this -- see `debug_grid_overlay.gd`'s `show_hud`): stand mid-
+    doorway (a boundary position on one axis, legitimately safe there
+    because the doorway leaves both neighboring cells open), then turn
+    and walk ALONG the wall on the OTHER, perpendicular axis. The old
+    check in `request_move()` only looked at the boundary axis matching
+    `direction` -- a pure north/south move never re-examined the
+    already-boundary X position at all, so the actor could slide right
+    up against a real wall on that axis without it ever being checked
+    again at the new row. Root cause: "this axis didn't change, so it
+    must already be validated" is only true the FIRST time a boundary
+    is reached -- moving along the OTHER axis can change which two
+    cells that SAME boundary touches (a different row entirely), and
+    neither has been checked at the new position before.
+    Fixed by checking BOTH axes independently on every move, not just
+    the one matching `direction`: the axis being actively advanced
+    still only needs to look one step further (the near side is
+    already known-good, it's where the move came from); an axis that's
+    ALREADY a boundary but isn't the one advancing needs BOTH its
+    neighbors checked, since neither has been validated at this new
+    position.
+    A second, separate inconsistency surfaced while verifying this:
+    `world_to_cell()` (float) and `step_to_cell()` (exact integer) --
+    two independent paths that are supposed to describe the same
+    lattice -- silently disagreed at exact boundary ties (confirmed:
+    `step_to_cell(19) == 9`, but the old `world_to_cell(9.5) == 10` for
+    the identical physical point). Never caused a visible bug on its
+    own (movement legality only ever used `step_to_cell()`), but caught
+    while cross-checking the doorway-turn fix, and fixed for the same
+    reason items 22-30 all exist: two different answers to "which cell
+    is this" is exactly the shape of bug this whole series has been
+    about. `world_to_cell()` now uses `ceili(v - 0.5)` instead of
+    `floori(v + 0.5)` -- the precise float equivalent of
+    `step_to_cell()`'s floor-division tie-breaking, verified to agree
+    at all 1001 swept boundary positions, not spot-checked.
+    Verified at all 4 doorways symmetrically (13/13), confirmed the fix
+    doesn't seal doorways shut (still walkable straight through), full
+    existing regression suite re-passes unchanged, and visually
+    reproduced the user's exact two screenshots before/after.
+
+32. **Item 31's per-axis boundary fix left one more gap: a true 2D
+    corner (both axes on a boundary at once) has FOUR cells meeting at
+    it, not two.** Flagged by the user's own systematic screenshot
+    testing (standing at corners next to the chest and the plant,
+    probing single-axis vs. both-axis boundary cases on purpose).
+    Checking each axis independently -- even checking both neighbors on
+    each, per item 31 -- only ever reaches the two cells sharing an
+    EDGE with the target's own cell. The fourth cell, sharing only the
+    CORNER (both axes shifted at once), was never examined by either
+    axis check alone. Root-caused, then isolated in a synthetic test
+    (a blocker placed at ONLY the diagonal cell, with both edge-adjacent
+    cells deliberately left open, so nothing but the missing check
+    could catch it) before touching production code.
+    Fixed by dropping the direction-dependent branching entirely --
+    that reasoning ("this axis is already validated because I'm not
+    moving along it") is exactly what produced item 31's bug in the
+    first place, so extending it further was the wrong instinct. The
+    new check is direction-INDEPENDENT: every cell a boundary position
+    could touch gets checked, unconditionally, regardless of which way
+    the move happens to be facing. One boundary axis -> 2 neighbor
+    checks; both axes at once -> all 4 corner combinations. Simpler
+    code, not just more correct -- no more asking "which side does the
+    direction-of-travel reasoning say is already safe."
+    Caught a real, unrelated GDScript bug while implementing this:
+    `var x: Array[int] = [1,-1] if cond else [0]` fails at RUNTIME
+    (not parse time) -- a ternary whose branches are array literals
+    returns a plain untyped `Array`, which can't assign into a typed
+    `Array[int]` variable. Confirmed empirically (a 4-line standalone
+    script) before concluding this, not assumed; fixed by using plain
+    if/else reassignment instead, which doesn't have the problem.
+    Verified: isolated synthetic-blocker test (5/5, plus a negative
+    control confirming the same move succeeds once the corner cell is
+    unblocked), full existing regression suite unchanged, and visually
+    confirmed diagonal approach to the real chest now stops a clean
+    full cell short with no overlap.
+
 ## Try it
 
 Open `core/scenes/tactical_demo_world.tscn` in the Godot 4.6 editor and

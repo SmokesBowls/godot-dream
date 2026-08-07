@@ -19,7 +19,7 @@
 # Viewing range is measured in steps (finer-grained, matches how far you
 # can actually see); interaction range is measured in CELLS, not steps.
 # That's not an arbitrary choice: solid Interactables (see
-# Interactable.blocks_movement / GridActor._is_object_obstructed) occupy
+# Interactable.blocks_movement / GridActor._is_object_obstructed_step) occupy
 # their whole cell as non-passable space, so the closest the player can
 # ever actually stand next to one is the adjacent cell -- which is 2
 # steps away at the current step_distance=0.5/cell_size=1.0 tuning, not
@@ -148,12 +148,12 @@ func _has_line_of_sight(from: Vector3, to: Vector3) -> bool:
 		# placed on -- and the wall is silently missed. Walls live on a
 		# single known layer regardless of the target's height; LOS is a
 		# floor-plan (X/Z) question, matching grid_actor.gd's
-		# _is_object_obstructed()'s identical "X/Z only, deliberately"
-		# reasoning for the same underlying cause.
+		# _is_object_obstructed_step()'s identical "X/Z only,
+		# deliberately" reasoning for the same underlying cause.
 		point.y = from.y
 		# player.world_to_cell(), NOT grid_map.local_to_map() -- confirmed
 		# empirically (raycast against the wall's real collision shape,
-		# see grid_actor.gd's _collision_test_point() doc comment) that
+		# see grid_actor.gd's step_to_cell() doc comment) that
 		# local_to_map() does NOT respect this project's
 		# cell_center_x/y/z = false setting: it stays floor-based
 		# regardless, disagreeing with where a wall ACTUALLY, physically

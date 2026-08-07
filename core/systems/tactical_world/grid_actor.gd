@@ -161,6 +161,17 @@ func _physics_process(delta: float) -> void:
 ## Vector2i(1, 0), Vector2i(0, -1), Vector2i(1, 1). Returns true if the
 ## move was accepted (a move already in progress, or a disallowed
 ## diagonal, returns false without side effects).
+##
+## HOW OBSTRUCTION IS DECIDED (rewritten from a float-rounding approach
+## to an exact-integer one -- see the big doc comment on step_to_cell()
+## below for the full history and why): current_step and target_step
+## are always EXACT integers. Every legality check in this function
+## works entirely in that integer step space -- step_to_cell() below
+## converts a step index to a GridMap cell index via true integer floor
+## division, which has no rounding, no ties, and therefore nothing left
+## to nudge or patch. World-space float positions only enter the
+## picture afterward, purely to compute _move_to (the visual glide
+## target) -- never to decide legality.
 func request_move(direction: Vector2i) -> bool:
 	if is_moving:
 		return false
@@ -170,25 +181,63 @@ func request_move(direction: Vector2i) -> bool:
 		return false
 
 	var target_step := current_step + Vector3i(direction.x, 0, direction.y)
-	var target_world := step_to_world(target_step)
 
-	# Collision is tested at a point nudged an epsilon back toward where
-	# this step came FROM, not at target_world itself -- see
-	# _collision_test_point()'s doc comment for the real, raycast-
-	# confirmed geometry bug this fixes: whenever step_distance divides
-	# cell_size into an exact half (the default 0.5/1.0 tuning), every
-	# other step's target lands EXACTLY on a cell boundary, and
-	# world_to_cell()'s nearest-cell rounding has to break that tie
-	# somehow. _move_to (the actual glide destination) stays
-	# target_world, unmodified -- only the LEGALITY CHECK uses the
-	# nudged point, so the actor still visually/physically ends up
-	# exactly on the intended half-step grid position.
-	if _is_obstructed(_collision_test_point(target_world, direction)):
+	if _is_step_obstructed(target_step):
 		move_blocked.emit(target_step)
 		return false
 
+	# A half-step landing exactly ON a shared cell boundary (not a
+	# cell's own center) is only legal if EVERY cell that boundary
+	# touches is itself traversable -- see _is_axis_step_on_boundary()'s
+	# doc comment for why a zero-radius point touching a wall's face is
+	# geometrically fine but this actor, with a real capsule radius,
+	# isn't.
+	#
+	# Deliberately direction-INDEPENDENT -- an earlier version of this
+	# check branched on whether `direction` was actively advancing each
+	# axis ("the axis I'm moving needs one more step ahead; the axis
+	# I'm not moving was already validated"), which fixed one real bug
+	# (doorway -> turn along the wall) but left a second one: when BOTH
+	# axes land on a boundary AT ONCE -- a true 2D grid corner, not just
+	# a 1D edge -- FOUR cells meet at that point, not two. Checking each
+	# axis separately (even checking both neighbors on each) only ever
+	# reaches the two cells that share an EDGE with the target's own
+	# cell; the fourth cell, which shares only the CORNER (both axes
+	# shifted at once), was never examined by either axis check alone.
+	# Reported precisely via screenshots of the actor standing at
+	# exactly such a corner, next to a chest and next to the plant.
+	#
+	# The fix: stop trying to reason about which neighbor "must already
+	# be validated by the direction of travel" (that reasoning is what
+	# produced the first bug) and just check every cell touching the
+	# boundary(ies) target_step sits on, unconditionally. One boundary
+	# axis -> 2 neighbors (an edge). Two boundary axes at once -> all 4
+	# corner combinations (dx, dz each independently +-1). Cheap either
+	# way -- at most 4 extra GridMap/group lookups, once per requested
+	# move, not per frame.
+	var per_cell := _steps_per_cell()
+	# NOT `x_offsets: Array[int] = [1, -1] if ... else [0]` -- a real
+	# GDScript quirk, caught by actually running it rather than assumed:
+	# a ternary whose branches are array literals returns a plain
+	# untyped Array, which fails at RUNTIME (not parse time) when
+	# assigned to an Array[int]-typed variable. Plain if/else
+	# reassignment doesn't have this problem.
+	var x_offsets: Array[int] = [0]
+	if _is_axis_step_on_boundary(target_step.x, per_cell.x):
+		x_offsets = [1, -1]
+	var z_offsets: Array[int] = [0]
+	if _is_axis_step_on_boundary(target_step.z, per_cell.z):
+		z_offsets = [1, -1]
+	for dx in x_offsets:
+		for dz in z_offsets:
+			if dx == 0 and dz == 0:
+				continue  # target_step itself -- already checked above
+			if _is_step_obstructed(target_step + Vector3i(dx, 0, dz)):
+				move_blocked.emit(target_step)
+				return false
+
 	_move_from = global_position
-	_move_to = target_world
+	_move_to = step_to_world(target_step)
 	_move_t = 0.0
 	is_moving = true
 	facing_direction = direction
@@ -198,78 +247,20 @@ func request_move(direction: Vector2i) -> bool:
 	return true
 
 
-## Nudges a target position an epsilon back toward the direction it came
-## from, so a target that lands EXACTLY on a cell boundary (the actual
-## reported bug: "a half-step at 0.5 is being rounded into the next
-## GridMap cell") tests as still touching the near side, not already
-## inside the far cell.
-##
-## Root cause, confirmed empirically before writing this (not assumed):
-## with cell_center_x/y/z = false, a wall at GridMap cell index N is
-## REALLY, physically centered at world N*cell_size, spanning
-## [N-0.5, N+0.5)*cell_size -- confirmed with a direct-space-state
-## raycast against the wall's actual collision shape, which hit at
-## exactly N-0.5, matching map_to_local(N) == N*cell_size and this
-## file's own cell_to_world()/step_to_world() formula exactly. So
-## world_to_cell()'s roundi()-based nearest-cell rounding is the
-## CORRECT mapping for this project's geometry -- it is NOT the same
-## bug class as "round vs. floor disagreeing with GridMap," and
-## switching it to floori() would desync it from where the wall mesh
-## and its collision shape actually are, reintroducing the exact
-## "half a space offset" misalignment bug cell_center_x/y/z=false was
-## originally set to fix (see tactical_demo_world.gd's comment on that).
-##
-## (A related, DIFFERENT bug was found and fixed alongside this one:
-## GridMap.local_to_map() does NOT respect cell_center_x/y/z at all --
-## confirmed empirically, it stayed floor-based regardless -- so it
-## disagreed with the wall's real position by up to half a cell.
-## interaction_controller.gd's line-of-sight check used to call
-## grid_map.local_to_map() directly for exactly this reason; it now
-## calls player.world_to_cell() instead, the same geometry-correct
-## mapping this file uses, so "can I walk there" and "can I see it"
-## can't disagree with each other about where a wall actually is.)
-##
-## The actual remaining problem was narrower than "which rounding
-## function": roundi() is right almost everywhere, but has to break a
-## tie at EXACTLY a cell boundary, and this project's default tuning
-## (step_distance=0.5 is exactly half of cell_size=1.0) makes every
-## OTHER step land precisely on that seam -- not a rare edge case here,
-## the common one. Godot's roundi() breaks ties away from zero, which
-## for a step moving further from the origin along that axis happens to
-## round INTO the cell being approached (the wall) rather than staying
-## on the near side. Nudging the TEST point (never the actual glide
-## destination -- see request_move()) by a small epsilon opposite the
-## direction of travel resolves the tie toward "still on the near side,
-## touching but not penetrating" regardless of which axis or which
-## direction the wall is approached from, without touching the
-## nearest-cell math itself (which is already correct).
-const _COLLISION_TEST_EPSILON := 0.01  # << 0.5 * min(step_distance, cell_size.x/z) for any sane tuning
-
-
-func _collision_test_point(target_world: Vector3, direction: Vector2i) -> Vector3:
-	var dir3 := Vector3(float(direction.x), 0.0, float(direction.y))
-	if dir3.length_squared() < 0.0001:
-		return target_world
-	return target_world - dir3.normalized() * _COLLISION_TEST_EPSILON
-
-
-func _is_obstructed(target_world: Vector3) -> bool:
-	if _is_wall_obstructed(target_world):
+func _is_step_obstructed(step: Vector3i) -> bool:
+	if _is_wall_obstructed_step(step):
 		return true
-	if check_object_collision and _is_object_obstructed(target_world):
+	if check_object_collision and _is_object_obstructed_step(step):
 		return true
 	return false
 
 
-func _is_wall_obstructed(target_world: Vector3) -> bool:
+func _is_wall_obstructed_step(step: Vector3i) -> bool:
 	if obstruction_map == null:
 		return false
 	# A GridMap item id of -1 (GridMap.INVALID_CELL_ITEM) means "no tile
-	# placed there" -- always open. The check happens against the
-	# GridMap CELL the target world position falls into (via cell_size),
-	# not against step coordinates directly -- those are on a different,
-	# finer lattice when step_distance < cell_size.
-	var cell := world_to_cell(target_world)
+	# placed there" -- always open.
+	var cell := step_to_cell(step)
 	var check_cell := cell + wall_layer_offset
 	var item := obstruction_map.get_cell_item(check_cell)
 	if item == GridMap.INVALID_CELL_ITEM:
@@ -279,14 +270,25 @@ func _is_wall_obstructed(target_world: Vector3) -> bool:
 	return obstacle_item_ids.has(item)
 
 
-func _is_object_obstructed(target_world: Vector3) -> bool:
+func _is_object_obstructed_step(step: Vector3i) -> bool:
 	# X/Z only, deliberately -- this actor's own step math never leaves
 	# y=0, but an object's world_to_cell().y depends on its own height
 	# above the floor (e.g. a chest sitting at y=0.35 rounds to a
 	# different cell layer than y=0.0 would), which has nothing to do
 	# with whether it blocks a same-plane XZ move. Comparing the full
 	# Vector3i here would silently never match on Y and never block.
-	var target_cell := world_to_cell(target_world)
+	#
+	# The TARGET side uses the exact integer step_to_cell() below; the
+	# OBJECT'S side still has to go through the float-based
+	# world_to_cell(), because chests/plants are hand-placed at
+	# arbitrary world positions, not derived from any step lattice --
+	# there's no integer step index to convert for them. That's fine:
+	# the entire class of tie-breaking bugs this file's history is full
+	# of only ever came from STEP-LATTICE positions landing exactly on a
+	# cell boundary, never from arbitrary hand-placed object positions
+	# (no bug has ever been reported here, and object placements in
+	# practice sit at plain cell centers, nowhere near a tie).
+	var target_cell := step_to_cell(step)
 	for node in get_tree().get_nodes_in_group(Interactable.BLOCKING_GROUP):
 		var obj := node as Node3D
 		if obj == null or obj == self:
@@ -297,11 +299,111 @@ func _is_object_obstructed(target_world: Vector3) -> bool:
 	return false
 
 
+## True if a step COMPONENT (one axis only -- request_move() calls this
+## once per axis, since each axis needs its own direction-vs-static
+## handling, see the comment there) sits exactly on a shared boundary
+## between two GridMap cells rather than on a cell's own center. Exact-
+## integer version of a check that used to compare floating-point world
+## coordinates against 0.5 -- see step_to_cell()'s doc comment for why
+## that whole approach was replaced. A cell spans `_steps_per_cell()`
+## consecutive step indices; its OWN boundary sits exactly halfway
+## through that span (only meaningful when `_steps_per_cell()` is even,
+## i.e. step_distance evenly divides cell_size into a whole, even
+## number of steps -- the project's actual 0.5/1.0 tuning gives exactly
+## 2 steps per cell, so the boundary is step-offset 1 of 2; an odd or
+## degenerate ratio just makes this a no-op rather than misfire).
+func _is_axis_step_on_boundary(step_component: int, steps_per_cell_axis: int) -> bool:
+	if steps_per_cell_axis <= 0 or steps_per_cell_axis % 2 != 0:
+		return false
+	return _floor_mod(step_component, steps_per_cell_axis) == steps_per_cell_axis / 2
+
+
 ## The GridMap cell the actor's actual current position falls into.
 ## Computed on demand rather than cached, since it's a different lattice
-## than `current_step` and only some callers need it.
+## than `current_step` and only some callers need it. Uses
+## world_to_cell() (float-based) rather than step_to_cell(), because
+## global_position is only guaranteed to sit exactly on the step
+## lattice while idle -- mid-glide it's a genuinely continuous
+## interpolated position (see _physics_process()), and there's no exact
+## integer step to convert then. When idle, global_position ==
+## step_to_world(current_step) exactly, so this and
+## step_to_cell(current_step) always agree anyway.
 func current_cell() -> Vector3i:
 	return world_to_cell(global_position)
+
+
+## Whole number of steps spanning one GridMap cell, on each axis.
+## Computed FRESH on every call rather than cached in _ready() --
+## deliberately: tactical_demo_world.gd (and anything like it) assigns
+## cell_size/step_distance from ITS OWN _ready(), which runs AFTER this
+## node's _ready() (children ready before parents -- the same ordering
+## fact that bit sprite_actor.gd's old `actor` setter and
+## debug_grid_overlay.gd's static-mesh build, see their history).
+## Caching this in _ready() would silently freeze in the export
+## defaults instead of the real configured values. The recompute is
+## cheap and this is only ever called from a discrete request_move(),
+## never per-frame, so there's no performance reason to cache it either.
+func _steps_per_cell() -> Vector3i:
+	if step_distance <= 0.0:
+		return Vector3i.ONE
+	return Vector3i(
+		maxi(roundi(cell_size.x / step_distance), 1),
+		maxi(roundi(cell_size.y / step_distance), 1),
+		maxi(roundi(cell_size.z / step_distance), 1)
+	)
+
+
+## Converts a STEP index (current_step's units) directly to a GridMap
+## cell index using exact integer floor division -- no floating-point
+## division, no rounding, and therefore no tie to break.
+##
+## This replaces an entire history of float-based tie-breaking bugs
+## (README items 22, 26-29): the previous approach converted a step
+## index to a world position (step * step_distance), divided by
+## cell_size, and rounded -- and because step_distance is exactly half
+## of cell_size in this project's tuning, EVERY OTHER step landed
+## exactly on a division tie. Every fix in that history was really
+## about which way a specific tie broke (roundi() ties away from zero;
+## floori(x+0.5) ties toward the lower cell; an epsilon nudge to dodge
+## the tie for movement legality specifically) -- each one correctly
+## fixed the case it targeted and then surfaced a DIFFERENT case the
+## same way, because floating-point division of an exact ratio still
+## produces an exact tie, and any stateless rule for breaking a tie
+## favors one side over the other somewhere.
+##
+## Integer floor division has no such tie: (steps_per_cell) consecutive
+## step indices belong to exactly one cell, unambiguously, for every
+## sign of step index, with no origin-relative or direction-relative
+## asymmetry possible. This is the actual fix for the whole bug class,
+## not one more instance of patching it.
+func step_to_cell(step: Vector3i) -> Vector3i:
+	var per_cell := _steps_per_cell()
+	return Vector3i(
+		_floor_div(step.x, per_cell.x),
+		_floor_div(step.y, per_cell.y),
+		_floor_div(step.z, per_cell.z)
+	)
+
+
+## True integer floor division (rounds toward negative infinity),
+## unlike GDScript's built-in `/` on ints (rounds toward zero -- e.g.
+## -7/2 == -3, not -4). Verified empirically against GDScript's actual
+## operator behavior before use, not assumed from another language's
+## semantics.
+static func _floor_div(a: int, b: int) -> int:
+	@warning_ignore("integer_division")
+	var q := a / b
+	var r := a - q * b
+	if r != 0 and ((r < 0) != (b < 0)):
+		q -= 1
+	return q
+
+
+## True integer floor modulo -- always has the same sign as `b` (i.e.
+## lands in [0, b) for a positive divisor), unlike GDScript's built-in
+## `%` on ints (takes the sign of `a`, e.g. -7 % 2 == -1).
+static func _floor_mod(a: int, b: int) -> int:
+	return a - _floor_div(a, b) * b
 
 
 func world_to_step(world_pos: Vector3) -> Vector3i:
@@ -339,19 +441,38 @@ func step_to_world(step: Vector3i) -> Vector3:
 ## boundary belongs to the next cell out, always, regardless of sign.
 ## Agrees with roundi() at every non-boundary point (both pick the
 ## nearest cell center identically); the two formulas only ever disagree
-## exactly AT a tie (x is a multiple of half a cell), which is precisely
-## the case _collision_test_point() already nudges away from before any
-## movement-legality check reaches this function -- so that fix is
-## unaffected by this one. This function is also used for plain
-## identification (current_cell(), the debug overlay, object collision
-## cell comparisons) where there's no direction of travel to nudge
-## against, which is exactly where the old origin-relative asymmetry was
-## actually visible.
+## exactly AT a tie (x is a multiple of half a cell). Movement legality
+## no longer routes through this function AT ALL for step-lattice
+## positions (see step_to_cell() -- exact integer floor division has no
+## ties to disagree about in the first place); this float-based version
+## remains for genuinely continuous/arbitrary inputs that were never on
+## the step lattice to begin with: current_cell() mid-glide, hand-placed
+## object positions (chests/plants), the debug overlay's live highlight,
+## and interaction_controller.gd's line-of-sight sampling.
+##
+## ceili(v/cell_size - 0.5), NOT floori(v/cell_size + 0.5) -- an earlier
+## version of this function used the floori form, which is correct for
+## every NON-tie position but resolves an EXACT tie UPWARD (toward the
+## higher cell). step_to_cell() (integer floor division on an exact
+## step index) resolves the same tie DOWNWARD -- so the two functions
+## silently disagreed about which cell a boundary position belongs to,
+## even for the exact same physical point (confirmed: step_to_cell(19)
+## == 9, but the old world_to_cell(step_to_world(19)) == world_to_cell(
+## 9.5) == 10). Never caused a visible bug on its own (movement
+## legality only ever calls step_to_cell(), never this function, for
+## deciding what's blocked) -- caught while verifying the doorway-turn
+## fix above, where a test read a position back through world_to_cell()
+## and got a different cell than the actor's own authoritative
+## current_step actually occupied. ceili(v - 0.5) is the exact float
+## equivalent of floor_div's tie-breaking (verified: agrees with
+## step_to_cell() at every step, not just spot-checked, see
+## verify_exhaustive_cell_mapping.gd) -- both now consistently treat a
+## boundary as belonging to the LOWER of its two neighboring cells.
 func world_to_cell(world_pos: Vector3) -> Vector3i:
 	return Vector3i(
-		floori(world_pos.x / cell_size.x + 0.5),
-		floori(world_pos.y / cell_size.y + 0.5),
-		floori(world_pos.z / cell_size.z + 0.5)
+		ceili(world_pos.x / cell_size.x - 0.5),
+		ceili(world_pos.y / cell_size.y - 0.5),
+		ceili(world_pos.z / cell_size.z - 0.5)
 	)
 
 
