@@ -210,25 +210,16 @@ func _resolve_world_direction(screen_dir: Vector2i) -> Vector2i:
 	return _snap_to_grid_direction(world)
 
 
-## Snaps a continuous world-space XZ vector to the nearest of the 8 grid
-## directions GridActor understands (4 cardinal + 4 diagonal -- whether
-## the diagonal result is actually ACCEPTED is entirely
-## GridActor.allow_diagonal's call, made inside request_move(); this
-## function just reports the nearest grid direction regardless). Same
-## angle convention as sprite_actor.gd's world_angle (atan2(x, -z), 0 deg
-## = world -Z) so the two files agree on what "north" means without
-## needing to share code.
+## Delegates to GridActor.snap_to_grid_direction() -- this used to
+## duplicate that math locally. Centralized there instead (see its doc
+## comment) so this file's camera-relative input resolution and
+## interaction_controller.gd's "turn to face what you're interacting
+## with" can't quietly drift apart from each other. Safe to call
+## unconditionally: every call site of this function already guards
+## `actor == null` before reaching it (_on_held_state_changed,
+## _on_move_finished).
 func _snap_to_grid_direction(world: Vector3) -> Vector2i:
-	if world.length_squared() < 0.0001:
-		return Vector2i.ZERO
-	var angle_deg := rad_to_deg(atan2(world.x, -world.z))
-	var octant := int(round(angle_deg / 45.0))
-	octant = ((octant % 8) + 8) % 8
-	var dirs: Array[Vector2i] = [
-		Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1),
-		Vector2i(0, 1), Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1),
-	]
-	return dirs[octant]
+	return actor.snap_to_grid_direction(world)
 
 
 func _on_move_finished(_step: Vector3i) -> void:

@@ -568,6 +568,216 @@ flagged rather than silently guessed.
     confirmed diagonal approach to the real chest now stops a clean
     full cell short with no overlap.
 
+33. **Fix #3, "staring at a wall": facing was previously ONLY updated on
+    a successful move, which read as the game not hearing input at all
+    once you'd stopped moving.** Two concrete cases fixed:
+    (a) bumping into a wall or solid object -- `request_move()`'s two
+    obstruction-rejection points now call the new `face_direction()`
+    before returning false, so a blocked attempt still visibly turns
+    the character toward it, even though it doesn't move there.
+    Deliberately NOT extended to the "already moving" or "diagonal
+    disallowed" rejections -- neither of those is "something physically
+    blocked me," they're "that request was never really attempted," so
+    there's nothing to acknowledge (and for "already moving," doing so
+    would spin the character on every held key spammed mid-glide).
+    (b) starting an interaction -- `interaction_controller.gd`'s
+    `begin_interaction()` now turns the source (if it's a GridActor) to
+    face the target, snapped to the nearest of GridActor's 8 grid
+    directions, even though no step is taken to reach it.
+    `snap_to_grid_direction()` was previously private, duplicated math
+    inside `grid_actor_player_input.gd` -- moved to GridActor as the
+    canonical version (same reasoning as items 22-32: two places
+    computing the same thing is exactly the failure class this project
+    keeps finding), with the input script now delegating instead.
+    A deeper issue surfaced verifying (b): `facing_direction` updated
+    correctly and immediately, but the SPRITE never visibly turned while
+    the interaction panel was open -- only after closing it. Root
+    cause: `begin_interaction()` pauses the tree, `SpriteActor` is
+    (correctly) left `PROCESS_MODE_PAUSABLE`, and `_process()` simply
+    doesn't run at all while paused. Making the whole node
+    `PROCESS_MODE_ALWAYS` was considered and rejected -- it would also
+    keep the run-animation frame advancing if a glide happened to be
+    mid-flight at the exact instant an interaction began, since
+    GridActor itself correctly stops processing when paused and never
+    gets to set `is_moving` back to false. Fixed instead with a new
+    `GridActor.facing_changed` signal, emitted from the single place
+    `facing_direction` is ever assigned now (`face_direction()`) --
+    signal delivery isn't gated by `process_mode` the way `_process()`
+    calls are, so `SpriteActor` (connected lazily on first `_process()`,
+    same ready-order pattern as `debug_grid_overlay.gd`) can react
+    immediately even while paused, without needing to run every frame.
+    Caught a real, unrelated GDScript runtime quirk while writing this
+    ticket's tests: `Array[int] = [1,-1] if cond else [0]` -- not this
+    ticket's bug, but adjacent code, confirmed with a standalone 4-line
+    script before moving on.
+    Verified: 18/18 covering both fix cases, the two deliberately-
+    excluded rejection reasons staying untouched, a diagonal interaction
+    target snapping to the correct compass direction, the delegated
+    snap function producing identical results to the code it replaced,
+    and (directly, not just visually) the sprite's row/flip actually
+    changing while the tree is paused, not just after unpausing. Full
+    existing regression suite (28/28, 13/13, 5/5, 17/17, 9/9, 12/12,
+    16/16, 8/8, 7/7, 6/6, plus the one pre-existing unrelated stale
+    test) unchanged.
+
+34. **Pause ownership moved from InteractionController to a new
+    autoload, `core/systems/game_state/game_state_manager.gd`.**
+    `InteractionController` used to write `get_tree().paused` directly
+    -- correct only as long as interaction was the sole reason the
+    world could ever pause. A weak-reference-backed pause-request
+    collection replaces the boolean: every system that needs the world
+    paused ADDS a (requester, reason) request; releases only its OWN;
+    the tree is paused exactly when at least one request survives,
+    decided in exactly one place. Idempotent per (requester, reason);
+    different requesters, or different reasons from the same
+    requester, are independently tracked. A requester freed without
+    calling release is auto-pruned (checked before every public method,
+    and every frame via `_process()`, since the manager is
+    `PROCESS_MODE_ALWAYS`) rather than freezing the game forever.
+    `InteractionController` still owns everything about the
+    interaction session itself (target, UI, confirm/cancel, facing) --
+    only the pause READ/WRITE moved.
+    Two real, confirmed Godot findings along the way, neither
+    assumed: (1) a script can't declare `class_name X` while ALSO being
+    registered as an autoload singleton named `X` -- Godot rejects it
+    at compile time ("hides an autoload singleton"); the autoload
+    registration itself already provides the global `GameStateManager`
+    identifier every caller needs, so `class_name` was redundant. (2) a
+    COMPILE-TIME type annotation (`var x: InteractionController`) in a
+    script forces Godot to compile `interaction_controller.gd` -- and
+    therefore resolve its `GameStateManager` reference -- while loading
+    THAT SCRIPT ITSELF, before its own `_init()` ever runs; three
+    existing test scripts had exactly this pattern and needed the
+    annotation loosened, not a timing fix (an `await` inside `_init()`
+    can't fix a failure that happens before `_init()` starts).
+    Verified with a new 38/38 suite (all 16 pure pause-arbitration
+    validations from the ticket against an isolated manager instance,
+    plus 5 integration checks against the real autoload +
+    InteractionController), full existing regression suite unchanged
+    (including every interaction pause-lifecycle test), and a project-
+    wide search confirming `get_tree().paused` is written in exactly
+    one place.
+
+35. **Jump added -- Space bar, purely cosmetic.** The donor `jump.png`
+    sheet was copied in early on but deliberately left unwired ("Stop
+    after the player sprite and shadow are working. Do not add jumping
+    yet."). This is that: a Sprite3D-local Y arc (`sin(PI*t)`, peak at
+    the midpoint) plus a 2-frame rise/fall animation, entirely inside
+    `sprite_actor.gd`. Never touches `GridActor` -- no change to
+    `global_position.y` (which stays 0 always; this actor never steps
+    vertically), `current_step`, `is_moving`, or any collision check.
+    Blocked while the game is paused for free, the same way movement
+    input already is -- `sprite_actor.gd` is left at the Godot default
+    process mode (PAUSABLE), so its new `_unhandled_input()` simply
+    doesn't fire while `GameStateManager` holds the tree paused.
+    A real bug caught by actually running it, not just written and
+    trusted: `Sprite3D.frame` validates bounds on EACH assignment
+    independently, not just the last one applied in a frame. The
+    original design let jump run as a pure "overlay applied last" on
+    top of the idle/run block, on the theory that a later assignment
+    would always win -- but the idle/run block computed a frame index
+    assuming `run_hframes` (6) while `sprite.hframes` was still stuck
+    at `jump_hframes` (2) from the previous frame, which is already out
+    of range the INSTANT it's assigned, before jump's own correction
+    ever runs. Fixed by having the idle/run block skip its
+    texture/hframes/frame writes ENTIRELY while a jump is playing (its
+    underlying `_run_progress` timer bookkeeping still runs
+    unconditionally, so nothing goes stale) and having jump's own
+    landing logic explicitly hand back a matching (hframes, frame) pair
+    in one step, rather than one property at a time.
+    Verified with a 19/19 suite: purely cosmetic (GridActor position/
+    step/is_moving genuinely untouched), the arc actually rises and
+    returns to exactly the resting Y, the frame column switches at the
+    arc's midpoint, landing while idle restores idle_texture, landing
+    while STILL MOVING (via a real held key, not a single tap that
+    would finish before the jump even ends) correctly restores
+    run_texture instead of idle, a second press mid-air doesn't restart
+    the arc, and jump input genuinely doesn't reach `_unhandled_input`
+    at all while `GameStateManager` holds the tree paused. Full existing
+    regression suite unchanged. `proof_sprites/README.md`'s frame-size
+    table was also stale (never updated after the art got upscaled
+    alongside `stand.png`/`run.png`) -- corrected.
+
+36. **Fix #2, "the Apple Problem": a small prop no longer blocks the
+    whole 1m cell it sits in.** Movement steps in 0.5m increments
+    (`step_distance`) but object collision used to check the whole 1m
+    GridMap cell (`world_to_cell()` match) -- any `Interactable` with
+    `blocks_movement` true silently vetoed all four 0.5m sub-cell steps
+    around it, including the three that have visually nothing in front
+    of them. Fixed with two new `Interactable` exports, only read when
+    `blocks_movement` is true: `occupies_full_cell` (default `true` --
+    unchanged behavior, chests/plants/furniture keep blocking their
+    whole cell) and `occupancy_radius` (meters, only read when
+    `occupies_full_cell` is `false` -- the object then blocks only steps
+    landing within that radius of its actual position). A demo `Apple`
+    node (small red sphere, `occupies_full_cell = false`,
+    `occupancy_radius = 0.15`) was added to `tactical_demo_world.tscn`
+    to prove it live.
+    Two real bugs found by actually running the existing regression
+    suite against this, not just the new one:
+    - The boundary-corner safety check in `request_move()` (item 32)
+      probes the lattice step one full step beyond a shared cell
+      boundary to ask "is the cell on the other side of this boundary
+      entirely solid" -- a question that only makes sense for
+      `occupies_full_cell` objects and walls. For a footprint object
+      placed at a normal cell-center position, that probe's neighbor
+      step is always the object's OWN center step, so it read as
+      "obstructed" no matter how small `occupancy_radius` was set,
+      permanently blocking every cardinal approach regardless of the
+      object's real footprint. Fixed with a `corner_safety_probe`
+      parameter on `_is_step_obstructed()` / `_is_object_obstructed_step()`
+      that skips the footprint branch specifically during that probe --
+      the object's actual overlap with the boundary point itself is
+      already caught correctly by the plain (non-probe) check on
+      `target_step` earlier in the same function.
+    - `_is_object_obstructed_step()`'s loop originally cast each
+      `BLOCKING_GROUP` member straight to `Interactable` to read the two
+      new exports, silently dropping (via `continue`) any group member
+      that isn't actually an `Interactable` instance --
+      `verify_diagonal_corner.gd`'s synthetic test blocker (a bare
+      `Node3D` added to the group directly, not a full `Interactable`)
+      went from "blocks its cell" to "invisible" the instant that cast
+      landed. `BLOCKING_GROUP`'s real contract was always "any Node3D
+      that wants to occupy space," not "any Interactable" -- fixed by
+      casting to `Node3D` first (as before) and only additionally
+      reading `Interactable`-specific fields when that second cast also
+      succeeds, falling back to the original full-cell behavior for
+      anything that isn't one.
+    - Also caught (and fixed by relocating, not by touching any logic):
+      the new `Apple` node's first placement, `(2, 0.12, 0)`, sat
+      directly on the +X ray from spawn that an existing held-movement
+      regression test already walks along, deterministically breaking
+      that test's "run texture never drops to idle mid-hold" assertion
+      once the held walk reached the now-blocked step next to it.
+      Confirmed deterministic (3/3 repeated runs), not flaky, before
+      moving it to `(2, 0.12, -2)`, off every cardinal ray and prior
+      long-hold test path from the origin -- the same placement
+      convention `Chest` (4, .35, 4) and `Plant` (-4, .3, -4) already
+      used for exactly this reason.
+    Verified with an 11/11 suite: `Interactable` defaults are unchanged
+    (`occupies_full_cell` true out of the box), the existing Chest still
+    blocks every step in its cell and nothing beyond it (regression),
+    the apple blocks only the step landing exactly on it and not steps
+    0.5m away, two steps sharing the SAME GridMap cell get different
+    blocked/open answers depending on which quadrant they land in (the
+    real-geometry proof the design memo called for), and `request_move()`
+    end-to-end both allows stepping into the open quadrant next to the
+    apple and still blocks stepping directly onto it. Full existing
+    regression suite confirmed clean afterward, including four older
+    scratchpad tests (`verify_exact_spec_scenarios.gd`,
+    `verify_stage1_input_resolution.gd`, `verify_sprite_direction.gd`,
+    `verify_doorway.gd`, `verify_movement_fix.gd`, `verify_substep.gd`)
+    that turned out to already be missing the `await process_frame`
+    fix from item 34's `GameStateManager` migration -- discovered while
+    re-sweeping for this ticket (that migration's own regression sweep
+    hadn't covered them), patched the same way as the files item 34
+    already fixed. `verify_sprite_direction.gd` still fails 4/6 on an
+    unrelated, pre-existing row-mapping mismatch that predates every
+    change in this session (confirmed against the untouched git
+    baseline) -- flagged, not silently fixed, since guessing at which
+    of several already-iterated-on direction conventions is "correct"
+    risks being wrong in a way a screenshot alone wouldn't catch.
+
 ## Try it
 
 Open `core/scenes/tactical_demo_world.tscn` in the Godot 4.6 editor and

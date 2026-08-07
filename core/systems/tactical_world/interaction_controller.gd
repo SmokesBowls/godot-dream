@@ -1,10 +1,16 @@
 # interaction_controller.gd
 # Godot version: 4.6
 #
-# Owns the entire interaction presentation and pause lifecycle. Nothing
-# else should call get_tree().paused, and Interactable/Chest/Plant
-# scripts don't need to know pausing exists at all -- this is the one
-# place that decides it.
+# Owns the entire interaction presentation and session lifecycle.
+# Interactable/Chest/Plant scripts still don't need to know pausing
+# exists at all. This controller does NOT decide get_tree().paused
+# anymore, though -- it's one REQUESTER among potentially several
+# (a cutscene, a menu, ...), not the authority. It asks
+# GameStateManager (core/systems/game_state/game_state_manager.gd, an
+# autoload) to pause on interaction start and releases its own request
+# on interaction end/cancel; GameStateManager is the only thing that
+# ever writes get_tree().paused, and only resumes once EVERY active
+# request -- from every system, not just this one -- has been released.
 #
 # Per frame (while NOT interacting), scans every node in the
 # "interactable" group and puts each one's label into exactly one of
@@ -31,12 +37,12 @@
 # separate cardinal-vs-diagonal check is needed beyond that formula.
 #
 # This node is process_mode ALWAYS so it keeps running (to read
-# confirm/cancel input and drive the interaction panel) even while it's
-# the one that just paused the tree. Everything else in the scene
-# (player, camera, GridMap, NPCs) is left at the Godot default
+# confirm/cancel input and drive the interaction panel) even after its
+# own pause REQUEST takes effect. Everything else in the scene (player,
+# camera, GridMap, NPCs) is left at the Godot default
 # (PROCESS_MODE_PAUSABLE / INHERIT), which is what actually stops them
-# when get_tree().paused becomes true -- no per-script pause checks
-# scattered elsewhere.
+# when GameStateManager sets get_tree().paused true -- no per-script
+# pause checks scattered elsewhere.
 
 extends Node
 class_name InteractionController
@@ -196,11 +202,31 @@ func begin_interaction(source: Node, target: Interactable) -> void:
 	_current_target = target
 	_current_source = source
 
+	# Turn to face what's being interacted with, even though no step is
+	# being taken to reach it -- real, reported problem: walk up to a
+	# wall, stop, interact with something off to the side, and the
+	# character kept staring at the wall the whole time since nothing
+	# about interacting ever touched facing before. `source` is typed
+	# as plain Node (not GridActor) since in principle anything could
+	# initiate an interaction; only turn it if it actually has a
+	# facing to turn.
+	var actor := source as GridActor
+	if actor:
+		actor.face_direction(actor.snap_to_grid_direction(target.global_position - actor.global_position))
+
 	if camera_rig and not allow_camera_during_interaction:
 		_camera_process_mode_before = camera_rig.process_mode
 		camera_rig.process_mode = Node.PROCESS_MODE_PAUSABLE
 
-	get_tree().paused = true
+	# NOT get_tree().paused = true anymore -- this controller no longer
+	# OWNS pause, it only ever REQUESTS it. See
+	# core/systems/game_state/game_state_manager.gd's file header for
+	# why a plain boolean breaks once a second system (a cutscene, a
+	# menu) can also need the world paused at the same time: whichever
+	# one finishes first would unpause the other out from under it.
+	# GameStateManager decides get_tree().paused; this is the only
+	# thing this controller is allowed to do about it -- ask.
+	GameStateManager.request_pause(self, &"interaction")
 	_show_panel(target)
 
 
@@ -231,7 +257,11 @@ func end_interaction() -> void:
 	is_interacting = false
 	_current_target = null
 	_current_source = null
-	get_tree().paused = false
+	# Releases ONLY this controller's own request -- if some other
+	# system also has an active pause request right now, the tree stays
+	# paused, correctly, until that other request is released too. This
+	# controller has no way to force an unpause and isn't supposed to.
+	GameStateManager.release_pause(self, &"interaction")
 	_hide_panel()
 	if camera_rig and not allow_camera_during_interaction:
 		camera_rig.process_mode = _camera_process_mode_before

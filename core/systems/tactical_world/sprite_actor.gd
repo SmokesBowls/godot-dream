@@ -53,26 +53,32 @@
 extends Node3D
 class_name SpriteActor
 
-## Plain reference now -- no signal connection needed. Animation state
-## used to be driven by GridActor's move_started/move_finished signals
-## (which is also why this used to need a setter to dodge Godot's
-## children-ready-before-parent ordering), but that had a real, reported
-## bug: GridActorPlayerInput ALSO listens to move_finished, and connects
-## to it earlier (in its own _ready(), which runs before this node's
-## `actor` ever got assigned by the parent scene). Godot delivers a
-## signal to listeners in connection order, so on every move_finished,
-## GridActorPlayerInput's handler ran first -- and for a held key, it
-## calls request_move() again immediately, which SYNCHRONOUSLY emits a
-## nested move_started for the next step before this node's OWN
-## move_finished handler had even run yet. That handler then fired
-## afterward and stomped the just-set "walking" state back to idle for a
-## step that was already in flight -- position kept gliding
-## (GridActor.is_moving true), but the sprite froze on a static idle
-## frame. Reordering connections would only fix it by accident and stay
-## fragile. Polling actor.is_moving directly every _process() frame
-## (see below) is immune to signal delivery order entirely -- by the
-## time this reads it, any same-frame chain of nested request_move()
-## calls has already settled, so there's nothing left to race.
+## Plain reference (no setter) -- ANIMATION state specifically stays
+## poll-driven, not signal-driven, for a real, previously-reported
+## reason: animation state used to be driven by GridActor's
+## move_started/move_finished signals, but GridActorPlayerInput ALSO
+## listens to move_finished and connects to it earlier (in its own
+## _ready(), which runs before this node's `actor` ever got assigned by
+## the parent scene) -- Godot delivers a signal to listeners in
+## connection order, so on every move_finished, GridActorPlayerInput's
+## handler ran first, and for a held key it calls request_move() again
+## immediately, which SYNCHRONOUSLY emits a nested move_started for the
+## next step before this node's OWN move_finished handler had even run
+## yet. That handler then fired afterward and stomped the just-set
+## "walking" state back to idle for a step already in flight -- the
+## sprite froze on a static idle frame while position kept gliding.
+## Polling actor.is_moving directly every _process() frame (see below)
+## is immune to signal delivery order entirely.
+##
+## A DIFFERENT signal (facing_changed) IS connected now, lazily, on the
+## first _process() call once `actor` is non-null (see
+## _facing_signal_connected below) -- that one doesn't have the ordering
+## problem above (nothing else double-fires it), and exists to solve a
+## separate, real problem: the game can be PAUSED (an interaction panel
+## open) while facing still needs to visibly update, and _process()
+## itself doesn't run at all while paused. Signal delivery isn't gated
+## by process_mode/pause the way _process() is, so this still reaches
+## the sprite even then.
 @export var actor: GridActor
 
 @export var camera_rig: TacticalCameraRig
@@ -86,6 +92,24 @@ class_name SpriteActor
 ## texture would need its own vframes too, not just its own hframes.
 @export var vframes := 5
 @export var run_fps := 12.0
+
+## The donor asset's jump.png -- copied into this project early on but
+## explicitly left unwired ("Do not add jumping yet"). 200x500 actual
+## (measured, not the stale 128x320 the asset README used to claim --
+## it got upscaled along with stand.png/run.png and the note was never
+## updated): 2 columns x 5 rows at 100x100/frame, same vframes=5 facing
+## convention as everything else here. Purely cosmetic -- see
+## _start_jump()'s doc comment for why this never touches GridActor.
+@export var jump_texture: Texture2D
+@export var jump_hframes := 2
+@export var jump_key: Key = KEY_SPACE
+## Seconds for one full hop, rise + fall.
+@export var jump_duration := 0.5
+## Peak visual height of the hop, in meters -- purely a Sprite3D offset,
+## never GridActor.global_position.y (which stays 0 always; this actor
+## never steps vertically). About a quarter of target_height -- visible
+## without reading as cartoonish.
+@export var jump_height := 0.4
 
 ## Target world-space height for the sprite -- "roughly the current
 ## capsule's height" per spec (capsule = 1.6m). Maps the FULL frame
@@ -103,6 +127,27 @@ var _was_moving := false
 var _run_progress := 0.0
 var _current_row := 0
 var _current_flip := false
+
+## Lazily connected the first time _process() sees a non-null `actor`
+## (same ready-order reasoning as the old setter, minus the
+## connect/disconnect churn -- actor is only assigned once
+## tactical_demo_world.gd's _ready() runs, strictly after this node's
+## own _ready(), see the `actor` comment above). Deliberately a SEPARATE
+## signal connection from the poll-driven animation state above, not a
+## replacement for it -- see facing_changed's doc comment on GridActor
+## for why: this is what lets the character visually turn to face an
+## interaction target WHILE the game is paused for it, since a signal
+## fires synchronously regardless of process_mode/pause, but _process()
+## itself does not run at all while paused.
+var _facing_signal_connected := false
+
+## Jump state -- see _start_jump()/_process_jump() below. Deliberately
+## separate from is_moving/_was_moving above: a jump can happen while
+## idle OR while walking, and must not disturb the run-cycle bookkeeping
+## either way (see _process_jump()'s doc comment for exactly how that's
+## kept safe).
+var _is_jumping := false
+var _jump_t := 0.0
 
 
 func _ready() -> void:
@@ -141,7 +186,9 @@ func _ready() -> void:
 	sprite.position = Vector3(0, target_height * 0.5, 0)
 
 	add_child(sprite)
-	# No signal connection here -- see the `actor` setter above for why.
+	# No signal connection here -- `actor` isn't assigned yet at this
+	# point (see the `actor` comment above); facing_changed gets
+	# connected lazily from _process() once it is.
 
 
 ## Recomputes pixel_size from WHATEVER texture is currently assigned, so
@@ -173,33 +220,22 @@ func _process(delta: float) -> void:
 	if actor == null:
 		return
 
-	var row_flip := _direction_to_row_flip(actor.facing_direction)
-	_current_row = row_flip.x
-	_current_flip = row_flip.y == 1
-	sprite.flip_h = _current_flip
+	if not _facing_signal_connected:
+		actor.facing_changed.connect(_on_facing_changed)
+		_facing_signal_connected = true
+
+	_update_facing_pose()
 
 	var is_moving_now := actor.is_moving
-
-	# Transition edges only, not level checks -- a consecutive step (the
-	# common held-key case) sees is_moving true on BOTH the frame before
-	# and after the step boundary (GridActor's own move_finished ->
-	# request_move() sequence never lets is_moving observably go false
-	# in between, see grid_actor_player_input.gd), so this branch simply
-	# doesn't fire again for it. That's the actual fix for "run
-	# animation restarts/freezes on consecutive steps": _run_progress and
-	# the run texture are only touched here, on a genuine idle->moving
-	# edge, never on every step.
-	if is_moving_now and not _was_moving:
-		_run_progress = 0.0
-		sprite.texture = run_texture
-		sprite.hframes = run_hframes
-		_update_pixel_size()  # run_texture's own per-frame height, not idle's
-	elif not is_moving_now and _was_moving:
-		sprite.texture = idle_texture
-		sprite.hframes = idle_hframes
-		_update_pixel_size()
+	var just_started_moving := is_moving_now and not _was_moving
+	var just_stopped_moving := not is_moving_now and _was_moving
 	_was_moving = is_moving_now
 
+	# Progress bookkeeping ALWAYS runs, even mid-jump -- this is timer
+	# state, not a display write, so it's always safe (see the DISPLAY
+	# write guard below for what specifically isn't).
+	if just_started_moving:
+		_run_progress = 0.0
 	if is_moving_now:
 		# Animation timing (run_fps) is intentionally independent of
 		# GridActor.move_duration -- the step glide and the leg-cycle
@@ -210,9 +246,132 @@ func _process(delta: float) -> void:
 		# session read as one continuous locomotion cycle instead of a
 		# per-step restart.
 		_run_progress = fmod(_run_progress + run_fps * delta, float(run_hframes))
-		sprite.frame = _current_row * run_hframes + int(_run_progress)
-	else:
-		sprite.frame = _current_row * idle_hframes  # idle_hframes is always 1 -- column 0
+
+	# The actual DISPLAYED texture/hframes/frame are a different story
+	# from the bookkeeping above -- these are skipped ENTIRELY while a
+	# jump is playing, not just planned-to-be-overwritten-later. Real
+	# bug, caught by actually running it: Sprite3D.frame validates
+	# bounds on EACH assignment independently, not just the last one in
+	# a frame -- setting `sprite.frame = row*run_hframes+n` here while
+	# `sprite.hframes` is still stuck at jump_hframes (2) from the
+	# previous frame's jump override is already out of range the moment
+	# it's assigned, even though _process_jump() below would have
+	# corrected hframes moments later in the same frame. Skipping this
+	# block entirely while _is_jumping avoids ever producing that
+	# invalid intermediate value; _process_jump()'s landing branch
+	# explicitly hands back a correct, matching (hframes, frame) pair
+	# in one shot instead of relying on this block to catch up.
+	if not _is_jumping:
+		if just_started_moving:
+			sprite.texture = run_texture
+			sprite.hframes = run_hframes
+			_update_pixel_size()  # run_texture's own per-frame height, not idle's
+		elif just_stopped_moving:
+			sprite.texture = idle_texture
+			sprite.hframes = idle_hframes
+			_update_pixel_size()
+
+		if is_moving_now:
+			sprite.frame = _current_row * run_hframes + int(_run_progress)
+		else:
+			sprite.frame = _current_row * idle_hframes  # idle_hframes is always 1 -- column 0
+
+	_process_jump(delta)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == jump_key:
+		_start_jump()
+
+
+## Purely cosmetic -- never touches GridActor, current_step, is_moving,
+## or collision in any way. This actor's actual grid position never
+## leaves y=0; the hop is a Sprite3D-local Y offset only, exactly the
+## same "presentation never writes back to gameplay" boundary
+## sprite_actor.gd has kept everywhere else. Ignored while already
+## jumping (no re-triggering/stacking mid-air) and if no jump_texture is
+## assigned (so an unconfigured actor just doesn't respond to the key,
+## rather than erroring).
+func _start_jump() -> void:
+	if _is_jumping or jump_texture == null:
+		return
+	_is_jumping = true
+	_jump_t = 0.0
+	sprite.texture = jump_texture
+	sprite.hframes = jump_hframes
+	# hframes and frame are set TOGETHER, deliberately -- changing one
+	# without the other, even briefly, is exactly the kind of mismatch
+	# that made Sprite3D reject an assignment elsewhere (see
+	# _process_jump()'s doc comment). Frame 0 of the jump's own row is
+	# always in range for jump_hframes regardless of whatever frame was
+	# showing a moment ago under a totally different hframes.
+	sprite.frame = _current_row * jump_hframes
+	_update_pixel_size()  # jump_texture's own per-frame height, not idle/run's
+
+
+## Called every frame, unconditionally -- but the MAIN _process() body
+## above deliberately skips its own texture/hframes/frame writes
+## whenever _is_jumping is true, so this function is the ONLY thing
+## touching the sprite's displayed texture/hframes/frame for a jump's
+## entire duration (see the guard comment on that block for the exact
+## bug that ordering avoids: Sprite3D.frame validates bounds on EACH
+## assignment independently, so hframes and frame must always change
+## together, never one before the other).
+func _process_jump(delta: float) -> void:
+	if not _is_jumping:
+		sprite.position.y = target_height * 0.5
+		return
+
+	_jump_t += delta / jump_duration
+	if _jump_t >= 1.0:
+		_is_jumping = false
+		_jump_t = 0.0
+		sprite.position.y = target_height * 0.5
+		# Hand back to whatever is CURRENTLY true, explicitly -- not
+		# "wait for the main body's next transition edge to catch up,"
+		# which might never fire again if is_moving happens to be the
+		# same now as it was when the jump started. hframes and frame
+		# set together, same reasoning as _start_jump().
+		if actor and actor.is_moving:
+			sprite.texture = run_texture
+			sprite.hframes = run_hframes
+			sprite.frame = _current_row * run_hframes + int(_run_progress)
+		else:
+			sprite.texture = idle_texture
+			sprite.hframes = idle_hframes
+			sprite.frame = _current_row * idle_hframes
+		_update_pixel_size()
+		return
+
+	# First half of the hop shows the rising frame, second half the
+	# falling one -- lands on frame 1 exactly when the arc (sin(PI*t),
+	# peak at t=0.5) is past its peak and descending. jump_hframes=2
+	# makes this a plain rise/fall split; a jump_hframes other than 2
+	# would just spread more evenly across the same rise/fall duration.
+	sprite.texture = jump_texture
+	sprite.hframes = jump_hframes
+	sprite.frame = _current_row * jump_hframes + clampi(int(_jump_t * jump_hframes), 0, jump_hframes - 1)
+	sprite.position.y = target_height * 0.5 + sin(PI * _jump_t) * jump_height
+
+
+## Recomputes and applies row/flip from actor.facing_direction and the
+## camera's CURRENT orientation -- called every _process() frame
+## normally (the camera can rotate while facing_direction itself stays
+## fixed, e.g. standing still and orbiting with Q/E, so this can't be
+## purely event-driven off facing_changed alone), and ALSO called
+## directly from _on_facing_changed() so a facing change is reflected
+## immediately even on a frame where _process() itself won't run (the
+## tree paused for an interaction -- see _facing_signal_connected's
+## comment above).
+func _update_facing_pose() -> void:
+	var row_flip := _direction_to_row_flip(actor.facing_direction)
+	_current_row = row_flip.x
+	_current_flip = row_flip.y == 1
+	sprite.flip_h = _current_flip
+
+
+func _on_facing_changed(_direction: Vector2i) -> void:
+	_update_facing_pose()
 
 
 ## Buckets the actor's world-space facing direction into 8 compass

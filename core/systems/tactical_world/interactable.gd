@@ -78,6 +78,47 @@ enum InteractionType {
 ## block (a sign, a floor switch, a pressure plate).
 @export var blocks_movement := true
 
+## Only read when blocks_movement is true. Fixes "the Apple Problem":
+## movement steps in 0.5m increments (step_distance) but this flag used
+## to make ANY blocking object occupy the entire 1m GridMap cell it sits
+## in -- so a small prop with a tiny visual footprint (an apple, a
+## dropped coin) silently vetoed all four 0.5m sub-cell steps around it,
+## including ones that visually have nothing in front of them.
+##
+## true (the default): unchanged behavior -- the object blocks its whole
+## cell, same as before this export existed. Correct for anything
+## actually as big as a cell: chests, furniture, plants, rocks, walls-
+## as-props.
+##
+## false: the object blocks only steps that land within occupancy_radius
+## of its actual position (see below), not the whole cell. Two steps in
+## the SAME cell can then get different answers depending on which
+## quarter of the cell they land in -- this is deliberate; it's what
+## proves the check is doing real geometry instead of a coarser
+## approximation with a different threshold.
+@export var occupies_full_cell := true
+
+## Only read when blocks_movement is true AND occupies_full_cell is
+## false. Radius, in meters, of this object's actual physical footprint
+## around its own global_position -- a step whose landing point falls
+## within this distance is blocked; anything farther (even in the same
+## GridMap cell) is not. 0.15 is sized for a small handheld prop (an
+## apple, a mushroom); widen it for something chair-sized, but if it
+## should really occupy most/all of a cell just leave occupies_full_cell
+## true instead -- this radius isn't meant to be pushed out to ~0.5m as
+## a substitute for that flag.
+##
+## Deliberately NOT cell-culled the way the occupies_full_cell branch is
+## in grid_actor.gd's _is_object_obstructed_step() -- an object placed
+## near a cell boundary can have this radius genuinely spill into the
+## neighbor cell, and a cell-index pre-check would silently miss that.
+## The distance check itself (squared, no sqrt) is cheap enough per
+## object that this isn't a real performance concern at any prop count
+## a hand-placed tactical scene actually reaches; if a future scene ever
+## needs hundreds of simultaneous small props, revisit with a spatial
+## hash then rather than pre-guessing the need now.
+@export var occupancy_radius := 0.15
+
 ## If true, the object can only be interacted with once (a one-time
 ## loot chest, a single-harvest bush that doesn't regrow). Enforced here
 ## so every subclass gets it for free instead of reimplementing a

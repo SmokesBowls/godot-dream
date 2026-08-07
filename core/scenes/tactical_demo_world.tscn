@@ -14,6 +14,7 @@
 [ext_resource type="Texture2D" uid="uid://d1nagce3w7txr" path="res://core/assets/proof_sprites/player/run.png" id="12"]
 [ext_resource type="Script" path="res://core/systems/tactical_world/camera_mode_controller.gd" id="13"]
 [ext_resource type="Script" path="res://core/systems/tactical_world/debug_grid_overlay.gd" id="14"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/jump.png" id="15"]
 
 [sub_resource type="Environment" id="Env_1"]
 background_mode = 1
@@ -51,6 +52,14 @@ albedo_color = Color(0.25, 0.5, 0.2, 1)
 material = SubResource("PlantMat")
 size = Vector3(0.5, 0.6, 0.5)
 
+[sub_resource type="StandardMaterial3D" id="AppleMat"]
+albedo_color = Color(0.75, 0.15, 0.15, 1)
+
+[sub_resource type="SphereMesh" id="AppleMesh"]
+material = SubResource("AppleMat")
+radius = 0.12
+height = 0.24
+
 [node name="TacticalDemo" type="Node3D" unique_id=1454402823]
 script = ExtResource("1")
 
@@ -85,6 +94,7 @@ mesh = SubResource("PlayerMesh")
 script = ExtResource("9")
 idle_texture = ExtResource("11")
 run_texture = ExtResource("12")
+jump_texture = ExtResource("15")
 
 [node name="GroundShadow" type="Node3D" parent="Player/VisualRoot" unique_id=122420869]
 script = ExtResource("10")
@@ -110,6 +120,19 @@ label_height_offset = 0.7
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Plant" unique_id=2146360643]
 mesh = SubResource("PlantMesh")
+
+[node name="Apple" type="Node3D" parent="." unique_id=3197215008]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0.12, -2)
+script = ExtResource("5")
+interaction_type = 2
+display_name = "Apple"
+interaction_prompt = "Pick Up"
+label_height_offset = 0.35
+occupies_full_cell = false
+occupancy_radius = 0.15
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Apple" unique_id=3197215009]
+mesh = SubResource("AppleMesh")
 
 [node name="InteractionController" type="Node" parent="." unique_id=1970130219]
 script = ExtResource("8")

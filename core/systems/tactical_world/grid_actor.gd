@@ -26,6 +26,18 @@ class_name GridActor
 signal move_started(from_step: Vector3i, to_step: Vector3i)
 signal move_finished(step: Vector3i)
 signal move_blocked(step: Vector3i)
+## Emitted whenever facing_direction actually changes (via
+## face_direction() -- see its doc comment). Exists specifically so
+## sprite_actor.gd can refresh its displayed pose the INSTANT facing
+## changes, even while the tree is paused for an interaction (signal
+## delivery isn't gated by process_mode the way _process() calls are --
+## SpriteActor deliberately stays PROCESS_MODE_PAUSABLE, not ALWAYS, to
+## avoid a worse problem: making the whole sprite always-process would
+## also keep its run-animation frame advancing if a glide happened to
+## be mid-flight the instant an interaction began, since GridActor
+## itself (correctly) stops processing when paused and never gets to
+## set is_moving back to false).
+signal facing_changed(direction: Vector2i)
 
 ## World-space size of one GridMap cell. Used ONLY to translate a target
 ## world position into a GridMap cell coordinate for obstruction checks
@@ -124,15 +136,52 @@ var is_moving := false
 
 ## Authoritative world-facing direction, in the same XZ direction units
 ## request_move() takes (e.g. Vector2i(0,-1) = north). Updated whenever a
-## move is ACCEPTED, so it always reflects the last direction the actor
-## actually committed to -- never touched on a blocked move, so bumping
-## into a wall doesn't spin the actor to face it.
+## move is ACCEPTED, and ALSO on a REJECTED move caused by an
+## OBSTRUCTION (a wall or solid object) -- see face_direction() and the
+## calls to it inside request_move() below. Deliberately reversed from
+## an earlier version of this comment, which said the opposite ("never
+## touched on a blocked move, so bumping into a wall doesn't spin the
+## actor to face it"): real, reported problem with that -- walk up to a
+## wall, stop, press a direction into it, and the character just kept
+## facing wherever it already was, which reads as the game not having
+## heard the input at all. Bumping into something now visibly turns the
+## character toward it; it still doesn't MOVE there.
+##
+## Deliberately NOT extended to every rejection reason -- the "already
+## moving" rejection (is_moving true) and the "diagonal disallowed"
+## rejection are excluded on purpose. Neither of those is "I tried to
+## go somewhere and something physically blocked me"; they're "that
+## request was never really attempted," so there's nothing to visually
+## acknowledge, and turning to face a direction that was silently
+## dropped (or worse, spinning on every repeated key spammed while
+## still mid-glide) would be noise, not feedback.
 ##
 ## This is plain gameplay state, not visual: GridActor stays agnostic to
 ## how (or whether) anything renders facing. A presentation layer
 ## (sprite_actor.gd) reads this instead of owning its own copy, and an
 ## AI-driven actor gets a meaningful facing for free the same way.
 var facing_direction := Vector2i(0, -1)
+
+
+## Turns the actor to face `direction` immediately, WITHOUT moving --
+## never touches current_step, is_moving, or emits move_started/
+## move_finished. THE single place facing_direction is ever assigned
+## (request_move()'s successful-move path routes through this too, not
+## just the obstruction/interaction callers) so facing_changed always
+## fires uniformly, regardless of why facing changed.
+##
+## Three callers: request_move() itself, both for a successful move AND
+## for an obstructed attempt (see facing_direction's doc comment above
+## for why bumping a wall now turns the actor); and
+## interaction_controller.gd's begin_interaction(), which turns the
+## actor to face whatever it just started interacting with even though
+## it never moved a step to reach it.
+func face_direction(direction: Vector2i) -> void:
+	if direction == Vector2i.ZERO or direction == facing_direction:
+		return
+	facing_direction = direction
+	facing_changed.emit(direction)
+
 
 var _move_from: Vector3
 var _move_to: Vector3
@@ -183,6 +232,7 @@ func request_move(direction: Vector2i) -> bool:
 	var target_step := current_step + Vector3i(direction.x, 0, direction.y)
 
 	if _is_step_obstructed(target_step):
+		face_direction(direction)
 		move_blocked.emit(target_step)
 		return false
 
@@ -232,7 +282,12 @@ func request_move(direction: Vector2i) -> bool:
 		for dz in z_offsets:
 			if dx == 0 and dz == 0:
 				continue  # target_step itself -- already checked above
-			if _is_step_obstructed(target_step + Vector3i(dx, 0, dz)):
+			# corner_safety_probe = true -- see that parameter's doc
+			# comment on _is_step_obstructed() for why footprint-mode
+			# objects are deliberately excluded from THIS check
+			# specifically, unlike the plain target_step check above.
+			if _is_step_obstructed(target_step + Vector3i(dx, 0, dz), true):
+				face_direction(direction)
 				move_blocked.emit(target_step)
 				return false
 
@@ -240,17 +295,38 @@ func request_move(direction: Vector2i) -> bool:
 	_move_to = step_to_world(target_step)
 	_move_t = 0.0
 	is_moving = true
-	facing_direction = direction
+	face_direction(direction)
 
 	move_started.emit(current_step, target_step)
 	current_step = target_step
 	return true
 
 
-func _is_step_obstructed(step: Vector3i) -> bool:
+## corner_safety_probe: true only when called from request_move()'s
+## boundary-corner safety loop (see its own comment for the full corner-
+## point rationale). That loop's actual question is "is the OTHER cell
+## touching this boundary entirely solid mass" -- true for walls and
+## occupies_full_cell objects (any point inside a solid cell correctly
+## answers that), but not a question a footprint-mode object (see
+## Interactable.occupancy_radius) can answer at all: its footprint is
+## small and doesn't necessarily reach the shared boundary, so treating
+## "this one lattice point 1 full step further out happens to land on
+## it" as "the whole neighboring cell is unsafe" is simply the wrong
+## question for it. A footprint object's actual overlap with the
+## boundary point ITSELF is already caught correctly by the plain
+## (non-probe) call on target_step, made once before that loop even
+## starts -- this parameter only suppresses the probe loop's OWN extra
+## (dx, dz) neighbor checks from re-triggering on it a second, wrong way.
+## Found empirically: an apple sitting on an even step index (a normal
+## cell-center placement) made every cardinally-adjacent boundary step
+## permanently unapproachable regardless of how small occupancy_radius
+## was set, because that boundary step's probe neighbor was always the
+## apple's own center step -- trivially "obstructed" no matter the
+## radius, defeating the whole point of a small footprint.
+func _is_step_obstructed(step: Vector3i, corner_safety_probe: bool = false) -> bool:
 	if _is_wall_obstructed_step(step):
 		return true
-	if check_object_collision and _is_object_obstructed_step(step):
+	if check_object_collision and _is_object_obstructed_step(step, corner_safety_probe):
 		return true
 	return false
 
@@ -270,7 +346,7 @@ func _is_wall_obstructed_step(step: Vector3i) -> bool:
 	return obstacle_item_ids.has(item)
 
 
-func _is_object_obstructed_step(step: Vector3i) -> bool:
+func _is_object_obstructed_step(step: Vector3i, corner_safety_probe: bool = false) -> bool:
 	# X/Z only, deliberately -- this actor's own step math never leaves
 	# y=0, but an object's world_to_cell().y depends on its own height
 	# above the floor (e.g. a chest sitting at y=0.35 rounds to a
@@ -290,13 +366,47 @@ func _is_object_obstructed_step(step: Vector3i) -> bool:
 	# practice sit at plain cell centers, nowhere near a tie).
 	var target_cell := step_to_cell(step)
 	for node in get_tree().get_nodes_in_group(Interactable.BLOCKING_GROUP):
-		var obj := node as Node3D
-		if obj == null or obj == self:
+		# BLOCKING_GROUP's actual contract is "any Node3D that wants to
+		# occupy space," not "any Interactable" -- Interactable._ready()
+		# is the only thing that populates it in practice, but nothing
+		# stops a test (or a future non-Interactable system) from joining
+		# a plain Node3D directly, and that must keep working exactly as
+		# it did before occupies_full_cell/occupancy_radius existed. Real
+		# regression, caught by actually running the existing corner-case
+		# suite: casting straight to Interactable here silently dropped
+		# such nodes (obj == null, continue) instead of blocking them.
+		var obj3d := node as Node3D
+		if obj3d == null or obj3d == self:
 			continue
-		var obj_cell := world_to_cell(obj.global_position)
-		if obj_cell.x == target_cell.x and obj_cell.z == target_cell.z:
+		var obj := node as Interactable
+		if obj == null or obj.occupies_full_cell:
+			# Unchanged from before occupies_full_cell existed: the
+			# object blocks its entire GridMap cell. Also the fallback
+			# for any non-Interactable BLOCKING_GROUP member (see above)
+			# -- no footprint data to read, so full-cell is the only
+			# behavior that makes sense for it.
+			var obj_cell := world_to_cell(obj3d.global_position)
+			if obj_cell.x == target_cell.x and obj_cell.z == target_cell.z:
+				return true
+		elif not corner_safety_probe and _is_step_within_object_footprint(step, obj):
+			# "The Apple Problem" fix -- see occupancy_radius's doc
+			# comment on Interactable for why this branch deliberately
+			# doesn't cell-cull first. Skipped entirely during a corner-
+			# safety probe -- see _is_step_obstructed()'s doc comment on
+			# corner_safety_probe for why.
 			return true
 	return false
+
+
+## True if `step`'s actual landing point (not its enclosing GridMap
+## cell) falls within `obj`'s occupancy_radius. Only ever called for
+## occupies_full_cell == false objects -- see _is_object_obstructed_step().
+func _is_step_within_object_footprint(step: Vector3i, obj: Interactable) -> bool:
+	var landing := step_to_world(step)
+	var dx := landing.x - obj.global_position.x
+	var dz := landing.z - obj.global_position.z
+	var reach := obj.occupancy_radius
+	return dx * dx + dz * dz <= reach * reach
 
 
 ## True if a step COMPONENT (one axis only -- request_move() calls this
@@ -416,6 +526,36 @@ func world_to_step(world_pos: Vector3) -> Vector3i:
 
 func step_to_world(step: Vector3i) -> Vector3:
 	return Vector3(step.x * step_distance, step.y * step_distance, step.z * step_distance)
+
+
+## Snaps a continuous world-space XZ vector to the nearest of the 8 grid
+## directions this actor understands (4 cardinal + 4 diagonal -- whether
+## a diagonal RESULT is actually accepted as a real MOVE is entirely
+## allow_diagonal's call, made inside request_move(); this function just
+## reports the nearest grid direction regardless, for any caller that
+## needs "which way, roughly, is that point from here" in this actor's
+## own direction vocabulary).
+##
+## Canonical home for this math -- it used to be duplicated privately in
+## grid_actor_player_input.gd (which now delegates here instead) and is
+## also used by interaction_controller.gd to turn the actor toward
+## whatever it's interacting with. One place owns the
+## atan2(x, -z) convention (0 deg = world -Z), matching sprite_actor.gd's
+## identical convention for displaying it -- the exact kind of
+## duplicated-math-that-can-drift this project has been bitten by
+## repeatedly (see README items 22-32) is worth avoiding here too, even
+## though this particular function is small.
+func snap_to_grid_direction(world_delta: Vector3) -> Vector2i:
+	if world_delta.length_squared() < 0.0001:
+		return Vector2i.ZERO
+	var angle_deg := rad_to_deg(atan2(world_delta.x, -world_delta.z))
+	var octant := int(round(angle_deg / 45.0))
+	octant = ((octant % 8) + 8) % 8
+	var dirs: Array[Vector2i] = [
+		Vector2i(0, -1), Vector2i(1, -1), Vector2i(1, 0), Vector2i(1, 1),
+		Vector2i(0, 1), Vector2i(-1, 1), Vector2i(-1, 0), Vector2i(-1, -1),
+	]
+	return dirs[octant]
 
 
 ## Deliberately NOT roundi(world_pos / cell_size), even though that
