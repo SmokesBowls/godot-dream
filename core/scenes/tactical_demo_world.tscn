@@ -4,7 +4,6 @@
 [ext_resource type="Script" uid="uid://bhe4r1714k0h" path="res://core/systems/tactical_world/tactical_camera.gd" id="2"]
 [ext_resource type="Script" uid="uid://bqvaftfu6rxyn" path="res://core/systems/tactical_world/grid_actor.gd" id="3"]
 [ext_resource type="Script" uid="uid://cmmwp05dqiue1" path="res://core/systems/tactical_world/grid_actor_player_input.gd" id="4"]
-[ext_resource type="Script" uid="uid://bmvfgvhrcq2c8" path="res://core/systems/tactical_world/interactable.gd" id="5"]
 [ext_resource type="Script" uid="uid://dwx6hjg5y13qr" path="res://core/systems/tactical_world/examples/harvestable_plant.gd" id="6"]
 [ext_resource type="PackedScene" path="res://core/ui/hotbar/hotbar_container.tscn" id="7"]
 [ext_resource type="Script" uid="uid://n206vrcme7rk" path="res://core/systems/tactical_world/interaction_controller.gd" id="8"]
@@ -15,6 +14,14 @@
 [ext_resource type="Script" path="res://core/systems/tactical_world/camera_mode_controller.gd" id="13"]
 [ext_resource type="Script" path="res://core/systems/tactical_world/debug_grid_overlay.gd" id="14"]
 [ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/jump.png" id="15"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/examples/merchant.gd" id="16"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/stand2.png" id="17"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/run2.png" id="18"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/jump2.png" id="19"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/follower.gd" id="20"]
+[ext_resource type="Script" path="res://core/systems/inventory/inventory.gd" id="21"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/examples/chest.gd" id="22"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/examples/apple.gd" id="23"]
 
 [sub_resource type="Environment" id="Env_1"]
 background_mode = 1
@@ -60,6 +67,14 @@ material = SubResource("AppleMat")
 radius = 0.12
 height = 0.24
 
+[sub_resource type="StandardMaterial3D" id="MerchantMat"]
+albedo_color = Color(0.6, 0.35, 0.65, 1)
+
+[sub_resource type="CapsuleMesh" id="MerchantMesh"]
+material = SubResource("MerchantMat")
+radius = 0.35
+height = 1.5
+
 [node name="TacticalDemo" type="Node3D" unique_id=1454402823]
 script = ExtResource("1")
 
@@ -102,12 +117,34 @@ script = ExtResource("10")
 [node name="PlayerInput" type="Node" parent="Player" unique_id=588399856]
 script = ExtResource("4")
 
+[node name="Inventory" type="Node" parent="Player"]
+script = ExtResource("21")
+
+[node name="Follower" type="CharacterBody3D" parent="." unique_id=213861856]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -2)
+script = ExtResource("3")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Follower" unique_id=460987115]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+shape = SubResource("PlayerShape")
+
+[node name="VisualRoot" type="Node3D" parent="Follower" unique_id=671701028]
+
+[node name="SpriteActor" type="Node3D" parent="Follower/VisualRoot" unique_id=1606303306]
+script = ExtResource("9")
+idle_texture = ExtResource("17")
+run_texture = ExtResource("18")
+jump_texture = ExtResource("19")
+
+[node name="GroundShadow" type="Node3D" parent="Follower/VisualRoot" unique_id=122420870]
+script = ExtResource("10")
+
+[node name="FollowerAI" type="Node" parent="Follower" unique_id=588399857]
+script = ExtResource("20")
+
 [node name="Chest" type="Node3D" parent="." unique_id=895907051]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0.35, 4)
-script = ExtResource("5")
-interaction_type = 3
-display_name = "Chest"
-interaction_prompt = "Open"
+script = ExtResource("22")
 label_height_offset = 0.7
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Chest" unique_id=1982141855]
@@ -123,16 +160,22 @@ mesh = SubResource("PlantMesh")
 
 [node name="Apple" type="Node3D" parent="." unique_id=3197215008]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0.12, -2)
-script = ExtResource("5")
-interaction_type = 2
-display_name = "Apple"
-interaction_prompt = "Pick Up"
+script = ExtResource("23")
 label_height_offset = 0.35
 occupies_full_cell = false
-occupancy_radius = 0.15
+occupancy_radius = 0.08
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Apple" unique_id=3197215009]
 mesh = SubResource("AppleMesh")
+
+[node name="Merchant" type="Node3D" parent="." unique_id=3197215010]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0.75, 2)
+script = ExtResource("16")
+display_name = "Merchant"
+label_height_offset = 1.4
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Merchant" unique_id=3197215011]
+mesh = SubResource("MerchantMesh")
 
 [node name="InteractionController" type="Node" parent="." unique_id=1970130219]
 script = ExtResource("8")

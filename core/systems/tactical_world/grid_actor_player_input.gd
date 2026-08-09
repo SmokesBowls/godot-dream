@@ -88,6 +88,16 @@ class_name GridActorPlayerInput
 @export var actor: GridActor
 @export var camera_rig: TacticalCameraRig
 
+## Same default as sprite_actor.gd's OWN jump_key export -- kept as a
+## separate export here rather than reading sprite_actor.gd's, since this
+## file already doesn't reach into that one for anything else (see the
+## header's three-separate-calculations rule) and a per-component key
+## export is this project's existing convention (InteractionController.
+## interact_key/cancel_key are the same shape). Both listeners fire off
+## the SAME physical key press independently -- see _unhandled_input()
+## below.
+@export var jump_key: Key = KEY_SPACE
+
 var _held_up := false
 var _held_down := false
 var _held_left := false
@@ -109,9 +119,34 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or event.echo:
 		return
-	if not _update_held_state(event as InputEventKey):
-		return  # not a tracked movement key -- nothing to do
+	var key_event := event as InputEventKey
+
+	# GAMEPLAY half of jump -- see request_jump_step()'s own header on
+	# GridActor for what this can and can't do. Deliberately does NOT call
+	# get_viewport().set_input_as_handled(): sprite_actor.gd listens for
+	# this exact same key, independently, for the purely-visual hop arc
+	# (unchanged since before this existed), and both need to see every
+	# press -- neither ever marks it handled today.
+	if key_event.pressed and key_event.keycode == jump_key:
+		_try_jump_step()
+
+	if not _update_held_state(key_event):
+		return  # not a tracked movement key -- nothing more to do
 	_on_held_state_changed(event.pressed)
+
+
+func _try_jump_step() -> void:
+	if actor == null or actor.is_moving:
+		return
+	# Jumps toward wherever the actor is currently FACING, not toward
+	# whatever movement keys happen to be held -- Space has no directional
+	# component of its own, and facing_direction is already the
+	# established "which way is this actor oriented" answer everything
+	# else in this framework reads (sprite_actor.gd's pose,
+	# interaction_controller.gd's turn-to-face). A no-op (nothing to step
+	# to/from that way) is silent and expected -- see request_jump_step()'s
+	# own doc comment.
+	actor.request_jump_step(actor.facing_direction)
 
 
 ## Updates the held/released flag for one of the four tracked movement

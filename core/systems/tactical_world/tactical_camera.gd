@@ -1,6 +1,6 @@
 # tactical_camera.gd
 # Godot version: 4.6
-#
+#-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # A tabletop/tactical camera rig for a Balrum-inspired 3D RPG.
 #
 # Design intent (from the brief): NOT a third-person over-the-shoulder rig

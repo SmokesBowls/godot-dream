@@ -3,8 +3,9 @@
 #
 # Example Interactable subclass -- a garden plant that can be harvested
 # once, then needs `regrow_seconds` before it's harvestable again. Shows
-# the intended usage pattern: set `interaction_type = HARVEST` on the
-# node (or in the editor Inspector) and override only `_on_harvest()`.
+# the intended usage pattern: set the HARVEST bit on `interaction_flags`
+# (or tick "Harvest" in the editor Inspector) and override only
+# `_on_harvest()`.
 #
 # Not meant to be the final word on farming -- it's here to prove the
 # Interactable contract is actually usable end-to-end, and to give the
@@ -24,7 +25,7 @@ var _is_ripe := true
 
 
 func _ready() -> void:
-	interaction_type = InteractionType.HARVEST
+	interaction_flags = 1 << InteractionType.HARVEST
 	interaction_prompt = "Harvest"
 	if display_name.is_empty():
 		display_name = "Harvest Plant"
@@ -41,13 +42,18 @@ func _on_harvest(source: Node) -> void:
 	_is_ripe = false
 	_regrow_timer.start(regrow_seconds)
 
-	# Placeholder hand-off point: a real inventory system would receive
-	# (yield_item_id, yield_amount) here. Left as a print + comment
-	# rather than a guessed-at inventory API, same spirit as the rest of
-	# this repo's "flag it, don't invent it" convention.
+	# core/systems/inventory/inventory.gd now exists -- this was a
+	# "print + comment" placeholder waiting for exactly that (see the old
+	# TODO this replaced). source.get_node_or_null() rather than a hard
+	# type on `source` -- Interactable.interact()'s `source` is plain
+	# Node on purpose (anything could in principle initiate an
+	# interaction), so this stays a no-op, not a crash, for a source that
+	# doesn't happen to have one.
+	var inventory := source.get_node_or_null("Inventory") as Inventory
+	if inventory:
+		inventory.add_item(yield_item_id, yield_amount)
+	GameFeedback.show_message("Harvested %d x %s" % [yield_amount, yield_item_id.capitalize()])
 	print("Harvested %d x %s from %s" % [yield_amount, yield_item_id, name])
-	# TODO: replace with a real call once an inventory system exists,
-	# e.g.: Inventory.add_item(source, yield_item_id, yield_amount)
 
 
 func _on_regrown() -> void:

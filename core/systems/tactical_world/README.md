@@ -10,9 +10,10 @@ inspired by *Balrum*'s 2D readable-world design.
 | File | What it is |
 |---|---|
 | `tactical_camera.gd` | `TacticalCameraRig` — pulled-back, downward-tilted, fully rotatable camera. Not third-person-behind, not top-down. Clamped pitch (35°–80° by default) so it can't degrade into either. |
-| `grid_actor.gd` | `GridActor` — discrete grid-snapped movement (`CharacterBody3D`), one cell per move, matches a GridMap's `cell_size`. |
+| `grid_actor.gd` | `GridActor` — discrete grid-snapped movement (`CharacterBody3D`), one cell per move, matches a GridMap's `cell_size`. The grid decides WHERE a step would land; a native `PhysicsDirectSpaceState3D.intersect_shape()` query using the actor's own real collision shape decides whether that landing spot is solid — see item 38 below. |
 | `grid_actor_player_input.gd` | WASD/arrow-key adapter for `GridActor`, with input buffering so a tap during a move isn't dropped. Kept separate from `GridActor` so AI/pathing can drive the same movement primitive without this input layer. |
-| `interactable.gd` | `Interactable` — base class for anything actionable (trees, rocks, chests, NPCs, ruined walls). `InteractionType` enum + one virtual `_on_*` handler per type + a generic `interacted` signal. Registers to the `"interactable"` group and owns an `InteractionLabel` child in `_ready()` — subclasses that override `_ready()` must call `super._ready()`. |
+| `interactable.gd` | `Interactable` — base class for anything actionable (trees, rocks, chests, NPCs, ruined walls). `interaction_flags` (a real `@export_flags` bitmask, not a single enum — see item 37) + one virtual `_on_*` handler per `InteractionType` + a generic `interacted` signal. Registers to the `"interactable"` group, and — if `blocks_movement` is true — builds a real `StaticBody3D` collision body (see item 38) and owns an `InteractionLabel` child, both in `_ready()`. Subclasses that override `_ready()` must call `super._ready()`. |
+| `examples/merchant.gd` | Concrete `Interactable` subclass proving the multi-type case `interaction_flags` exists for — one NPC with both TALK and OPEN active at once (see item 37). |
 | `interaction_label.gd` | `InteractionLabel` — reusable floating world-space nameplate, exactly three states (`set_hidden()` / `show_name()` / `show_action()`). Two stacked `Label3D`s (name + action) since Label3D has no per-line color markup. |
 | `interaction_controller.gd` | `InteractionController` — the *only* thing that calls `get_tree().paused`. Scans the `"interactable"` group each frame (step-distance Euclidean for viewing range, Manhattan==1 for interaction range, grid-sampled line-of-sight against the GridMap), drives each object's label, and owns `begin_interaction()`/`end_interaction()`/`cancel_interaction()`. `PROCESS_MODE_ALWAYS` so it (and its confirm/cancel panel) keeps running through the pause it causes; everything else pauses via the Godot default. |
 | `examples/harvestable_plant.gd` | Concrete `Interactable` subclass — a garden plant with a regrow timer, showing the intended override pattern (including the required `super._ready()` call). |
@@ -22,19 +23,31 @@ inspired by *Balrum*'s 2D readable-world design.
 | `camera_mode_controller.gd` | `CameraModeController` — three camera modes on F1/F2/F3 (not literal 1/2/3 — those are hotbar slots): behind-sprite (auto-follows the player's facing, the one place the camera is *allowed* to auto-rotate), locked (default — matches the rig's own baseline, no auto-rotation), quick top-down (deliberately, temporarily overrides the rig's own anti-top-down pitch clamp, restored exactly on exit). |
 | `../assets/proof_sprites/` | Temporary placeholder character art (a sci-fi robot, copied from Godot's official "2.5d" demo project as a technique proof, not final art) plus the exact frame-layout mapping, measured not guessed. |
 | `VISUAL_STYLE_GUIDE.md` | Poly budgets, shading approach, and depth/verticality cues for art built to be seen from this camera. |
+| `follower.gd` | `Follower` — trailing-step companion AI. Drives its own `GridActor` by replaying the LEADER's own step history a few moves behind, rather than pathing toward the leader's current position — see item 40. |
+| `examples/apple.gd` | `ApplePickup` — a one-off pickup prop: adds itself to the picker's Inventory, then removes itself from the world. See item 41. |
+| `examples/chest.gd` | `Chest` — a lootable container: opens a real `LootWindow` so the player chooses which items to take, leaving the rest for later. See items 41-42. |
+| `ledge.gd` | `Ledge` — a declarative walkable elevated footprint (height + X/Z size), what `GridActor.request_jump_step()` reads to know where a real step-up is possible. See item 42. |
+| `../inventory/inventory.gd` | `Inventory` — minimal item_id->amount component, attached to the Player. See item 41. |
+| `../feedback/game_feedback.gd` | `GameFeedback` — autoload; shows one transient on-screen line for interaction effects (talk, loot, harvest) that used to only `print()`. See item 41. |
+| `../../ui/inventory_hud/` | `InventoryHud` — always-on top-right readout of the Player's Inventory contents. See item 41. |
+| `../../ui/toggle_list_window/` | `ToggleListWindow` base + `LootWindow`/`ShopWindow` autoloads — modal, keyboard-driven "pick some rows" windows backing Chest and Merchant's satchel. See item 42. |
 | `../../ui/hotbar/` | Draggable 10-slot hotbar UI (see below). |
-| `../../scenes/tactical_demo_world.tscn` + `.gd` | A runnable scene wiring all of the above together: floor + perimeter wall (with one deliberate gap), player, a chest, a harvestable plant, the camera rig, and the hotbar overlay. Open and run it to see the pieces working together. |
+| `../../scenes/tactical_demo_world.tscn` + `.gd` | A runnable scene wiring all of the above together: floor + perimeter wall (with one deliberate gap), player, a follower companion, a chest, a harvestable plant, a merchant, an apple, a jump-test platform, the camera rig, inventory HUD, and the hotbar overlay. Open and run it to see the pieces working together. |
 
 ## Design decisions made without being asked — check these
 
 Per this repo's existing convention (see the event-store port's README):
 flagged rather than silently guessed.
 
-1. **One `interaction_type` per `Interactable` instance, not a bitmask.**
-   An object that both talks and opens (an NPC with a satchel) is
-   modeled as two `Interactable` nodes, not one multi-typed one. If the
-   real design wants single-object multi-type interactions, the enum
-   dispatch in `interact()` needs to become a set instead of a scalar.
+1. **Superseded — see item 37: `interaction_flags` is now a real bitmask,
+   not a single enum.** The original decision (below, kept for history)
+   was reversed once an actual multi-type case (a merchant NPC with a
+   satchel) needed it: *"One `interaction_type` per `Interactable`
+   instance, not a bitmask. An object that both talks and opens (an NPC
+   with a satchel) is modeled as two `Interactable` nodes, not one
+   multi-typed one. If the real design wants single-object multi-type
+   interactions, the enum dispatch in `interact()` needs to become a set
+   instead of a scalar."*
 2. **Superseded: floor and walls now share ONE thin GridMap layer,
    distinguished by item id, not by a y-offset.** The original y=0
    floor / y=1 wall split (previous version of this note) turned out to
@@ -777,6 +790,456 @@ flagged rather than silently guessed.
     baseline) -- flagged, not silently fixed, since guessing at which
     of several already-iterated-on direction conventions is "correct"
     risks being wrong in a way a screenshot alone wouldn't catch.
+
+37. **`Interactable.interaction_flags` replaced the single-scalar
+    `interaction_type` enum with a real `@export_flags` bitmask,
+    reversing item 1's original decision.** The old rule -- one
+    `InteractionType` per node, so a dual-purpose entity (an NPC that
+    both talks and has a lootable satchel) had to be two `Interactable`
+    nodes sharing one world position -- was a real, reported scalability
+    problem in practice, not a hypothetical one: two nodes meant two
+    independent `InteractionLabel`s computing the same distance/line-of-
+    sight math against the same target position, two entries in every
+    "what's here" group query, and two separate `_ready()`/`interact()`
+    lifecycles for what is conceptually one entity, with nothing tying
+    them together.
+    Fixed by making `interaction_flags` a real bitmask
+    (`@export_flags("Examine", "Talk", "Harvest", "Open", "Climb",
+    "Pass Through", "Toggle")`, inspector-editable as checkboxes) instead
+    of a scalar `InteractionType`. `interact(source, type := -1)` now
+    takes an explicit `type` (defaulting to `primary_interaction_type()`,
+    the type an unqualified F-press should run); a single-flag object
+    (every existing Chest/Plant/Apple) has an unambiguous "the" type
+    regardless of `primary_interaction_type_override`, so no existing
+    scene needed anything beyond a mechanical `interaction_type = X` ->
+    `interaction_flags = 1 << X` conversion. `prompt_for(type)` resolves
+    the verb text per type -- a single-flag object always uses the
+    existing `interaction_prompt` string unchanged; a multi-flag object
+    consults the new `interaction_prompts` dictionary, falling back to a
+    generic per-type default. `examples/merchant.gd` is a new concrete
+    example (TALK primary, OPEN secondary) proving the exact "NPC with a
+    satchel" case item 1 originally punted on, added to
+    `tactical_demo_world.tscn` the same way `Apple` proved item 36.
+    `InteractionController` surfaces the multi-type case without
+    touching the common single-type path: the floating world-space label
+    still only ever shows the primary action (unchanged), but
+    `begin_interaction()` now also collects every OTHER active type into
+    `_current_secondary_types`, and the bottom-screen confirm panel lists
+    one extra numbered line per secondary action (`[1] Open Satchel`,
+    reusing the hotbar's existing 1-9 key vocabulary) -- F still always
+    confirms the primary, unchanged from before. A real, disclosed
+    side effect: the panel's hint text is now built as one line per
+    action rather than one hand-formatted string, so even a single-type
+    target's panel changed from one line (`[F] Verb    [Esc] Cancel`) to
+    two (`[F] Verb` / `[Esc] Cancel`) -- the panel's `PanelContainer` was
+    changed from a fixed 70px box to grow-to-content
+    (`grow_vertical = GROW_DIRECTION_BEGIN`) specifically so this and any
+    future longer action list never silently overflows a hardcoded size.
+    Verified with a 21/21 headless suite (`verify_pause_and_interaction.gd`,
+    scratchpad): `has_interaction_type()`/`active_interaction_types()`/
+    `primary_interaction_type()`/`prompt_for()` against both the Merchant
+    (multi-flag) and a synthetic single-flag object, `interact()` with no
+    argument correctly running the primary handler only, an explicit
+    secondary `interact(_, OPEN)` running the correct handler, and an
+    explicit call with a type the object does NOT have active correctly
+    no-op'ing rather than crashing or silently redirecting to the
+    primary. Full scene also run headless 120 frames with the Merchant
+    present in `InteractionController`'s per-frame label scan with no
+    errors.
+
+38. **Movement obstruction was rewritten from GridMap-cell/step-lattice
+    math to a native `PhysicsDirectSpaceState3D.intersect_shape()` query
+    at the exact destination, replacing the entire lineage items 22-32
+    and 36 built up.** Not one more patch on that lineage -- a
+    structural change in what kind of question `request_move()` even
+    asks. Every bug in that history (half-step boundary ties, the
+    corner-safety probe needing its own carve-out for footprint objects,
+    the Apple Problem's squared-distance reimplementation of "does this
+    overlap") came from reasoning about integer cell/step LATTICE
+    positions as a stand-in for real geometry. A real shape-vs-shape
+    overlap query, cast with the actor's OWN actual `CollisionShape3D`
+    at a real world position, has no lattice to tie-break on in the
+    first place -- it answers "does my actual body fit here" directly.
+    `GridActor` now only uses the grid to compute WHERE a step would
+    land (`step_to_world()`); whether that spot is solid is entirely a
+    physics query against two new dedicated collision layers
+    (`GridActor.WALL_COLLISION_LAYER_BIT` = 2, `OBJECT_COLLISION_LAYER_BIT`
+    = 3), masked by the actor's own `check_object_collision`. `obstruction_map`,
+    `obstacle_item_ids`, `wall_layer_offset`, and every GridMap-cell-index
+    helper (`step_to_cell()`, `_floor_div`/`_floor_mod`,
+    `_is_axis_step_on_boundary()`, the corner-safety-probe loop) are
+    gone from `GridActor` entirely -- there's no lattice tie left for any
+    of them to exist for.
+    Walls get real collision from `tactical_demo_world.gd`'s new
+    `_build_wall_collision()` -- one `StaticBody3D`/`BoxShape3D` per wall
+    cell, built independently of the GridMap's OWN collision shapes
+    (which stay exactly as they were, on the default layer, still only
+    used by `ground_shadow.gd`'s raycast). This is deliberate, not
+    redundant: GridMap's `collision_layer`/`collision_mask` are ONE
+    property of the whole node, shared by every item it places, so there
+    is no per-item way to put walls on the obstruction layer without
+    ALSO putting the floor's paper-thin collision boxes on it -- and a
+    movement probe resting at ground level would then sit right at the
+    floor box's own top surface, close enough to the default physics
+    contact margin to risk exactly the kind of geometry-precision
+    landmine this project's history is full of. Independent, wall-only
+    bodies sidestep the question entirely.
+    Solid `Interactable`s get their own real collision the same way --
+    `_build_collision_body()`, called from `_ready()` when
+    `blocks_movement` is true, builds a `StaticBody3D` with a
+    `BoxShape3D` (full-cell objects, sized via the new `full_cell_size`
+    export) or `CylinderShape3D` (footprint objects, `occupancy_radius`)
+    on `OBJECT_COLLISION_LAYER_BIT`. Both shapes are given a deliberately
+    huge Y-extent (100m) regardless of the object's own height or
+    position, reproducing -- via physics -- the exact "X/Z only,
+    deliberately" rule the old grid-cell check documented (an object's
+    height above the floor has nothing to do with whether it blocks a
+    same-plane move); this avoids reintroducing a NEW Y-alignment bug
+    class in physics form.
+    One real, disclosed BEHAVIOR CHANGE surfaced while verifying this,
+    not merely a re-implementation: `occupancy_radius` previously
+    measured a footprint object's block radius against the bare STEP
+    LANDING POINT (the old check treated the moving actor as a
+    zero-size point for this specific comparison, even though walls
+    separately got a real capsule-radius patch of their own in item 29).
+    A physics shape query has no such asymmetry -- two shapes overlap
+    when the distance between their centers is less than the SUM of
+    both radii, so the moving actor's own real capsule radius (0.4 in
+    this framework's default rig) now genuinely adds to
+    `occupancy_radius` when deciding what's blocked. This is judged a
+    correctness IMPROVEMENT (walls and footprint objects now use the
+    same real-geometry rule instead of two different approximations),
+    but it meant the demo Apple's tuning (`occupancy_radius = 0.15`)
+    no longer left an adjacent 0.5m step open against a 0.4-radius
+    capsule (0.15 + 0.4 = 0.55 > 0.5) -- caught by a failing regression
+    test, not assumed correct. Retuned to `occupancy_radius = 0.08`
+    (0.08 + 0.4 = 0.48 < 0.5), which restores the original item 36 proof
+    (a step 0.5m from the apple's center stays open; the step exactly on
+    it is blocked) under the new, more physically accurate rule --
+    documented directly on the `occupancy_radius` export so a future
+    object with a different actor's capsule radius in mind tunes it
+    correctly the first time.
+    Verified with an 8/8 headless suite (`verify_physics_obstruction.gd`,
+    scratchpad, run against the real `tactical_demo_world.tscn`, not a
+    synthetic stand-in): a solid perimeter wall cell (away from the
+    doorway) rejects a step into it; a straight walk through the actual
+    doorway gap succeeds end-to-end; the Chest (full-cell) rejects
+    stepping onto its cell; the Apple (footprint) leaves a step 0.5m
+    away open while still blocking the exact step on top of it, restoring
+    item 36's original proof; `check_object_collision = false` lets an
+    actor pass through the Chest while a wall still blocks it regardless;
+    and a diagonal step into a target cell with a blocker at ONLY the
+    far diagonal corner (both edge-adjacent cells left open) is still
+    correctly rejected -- the exact item 32 corner case, now handled for
+    free by real shape geometry instead of the direction-independent
+    4-neighbor probe loop item 32 had to add by hand. The first run of
+    this suite caught two real bugs before they were ever chalked up as
+    "the physics rewrite doesn't work": a test-harness bug (not
+    resetting `is_moving` between manually-repositioned test cases,
+    which made every `request_move()` after the first silently
+    auto-reject) that produced two false FAILs, and the genuine
+    `occupancy_radius` tuning issue above, caught by a THIRD failure that
+    survived fixing the harness bug -- not waved off as "probably the
+    test's fault" a second time.
+
+39. **`GameStateManager`'s dead-requester cleanup was rewritten from a
+    `WeakRef` + per-frame `_process()` sweep to a `tree_exited`-signal
+    hook, replacing the standing poll with an event that only fires when
+    there's actually something to clean up.** The old design's own
+    header was explicit that the per-frame sweep was a FAILSAFE, not the
+    primary path (every public method already pruned before doing its
+    own work) -- but it still ran, unconditionally, every single frame,
+    for the entire life of the game, to guard against an event (a
+    requester freed without calling `release_pause()`) that in practice
+    happens a handful of times per session at most. A continuous
+    per-frame cost paid to guard against a rare event is exactly the
+    "contradicts decoupled signal-driven architecture" problem it was
+    flagged for.
+    Fixed by connecting to the requester's own built-in `tree_exited`
+    signal the first time it makes a request (`_sync_requester_connection()`),
+    and disconnecting again once it has zero active requests left --
+    idempotent either direction, and at most one connection per
+    requester regardless of how many different `reason`s it holds
+    simultaneously. `_on_requester_tree_exited()` releases every request
+    that requester still held, the same as if it had called
+    `release_all_from()` on its own way out. `_process()` and the
+    `_prune_dead_requests()` sweep it drove are both gone entirely --
+    there's no standing loop left to remove requests, so nothing runs
+    at all in an idle frame with no pause activity. `PauseRequest.requester`
+    is now a hard `Node` reference instead of a `WeakRef`, which is safe
+    specifically BECAUSE cleanup is now guaranteed to run before the
+    requester is actually freed: Godot removes a node from its tree
+    (firing `tree_exited`) as part of the deletion sequence, strictly
+    before the node object itself is destroyed, so there's no window
+    where a request could be pointing at a truly-dead object. A useful
+    side effect: `pause_request_removed`'s `requester` argument is now
+    ALWAYS the real object, even in the automatic-cleanup case -- the old
+    `WeakRef` version had to pass `null` there since by the time a dead
+    ref was pruned the requester was already gone.
+    Requesters are now typed `Node` (not the old `Object`) at the
+    `request_pause()` call site, since `tree_exited` is a Node-specific
+    signal -- every real requester in this project (`InteractionController`,
+    and every anticipated future one: a cutscene player, a menu) already
+    was one in practice, so this makes an existing implicit constraint
+    explicit rather than narrowing anything real.
+    One accepted, documented scope limit, flagged rather than silently
+    assumed away: `tree_exited` fires on ANY removal from the tree, not
+    only final deletion -- a requester that's deliberately REPARENTED
+    (removed then immediately re-added elsewhere) would trigger this
+    cleanup too, releasing its request even though the node is still
+    alive. Nothing in this project currently reparents a pause requester;
+    a future one that needs to survive reparenting would need to
+    re-request pause after being re-added, the same extra step it would
+    need for any other per-tree setup.
+    Verified with an 8/8 headless suite (part of
+    `verify_pause_and_interaction.gd`, scratchpad, against a real
+    instantiated `GameStateManager`, not a mock): a single request
+    pauses; an idempotent repeat from the same (requester, reason) does
+    not duplicate; a second requester with a different reason adds a
+    genuinely separate request; releasing one requester's request
+    leaves a different, still-active requester's claim intact (the
+    exact bug this whole file exists to prevent -- see the file header);
+    and, the case this ticket was actually about, freeing a requester
+    node WITHOUT ever calling `release_pause()` correctly and
+    automatically clears its request with no polling involved, confirmed
+    by checking `has_pause_requests()`/`active_pause_count()` immediately
+    after the freed node's `tree_exited` had a chance to fire.
+
+40. **`follower.gd` (`Follower`) added — a trailing-step companion NPC,
+    proven live in `tactical_demo_world.tscn` with a second sprite skin
+    (`stand2.png`/`run2.png`/`jump2.png`).** Deliberately NOT a
+    distance-chase (checking the leader's current position each move and
+    stepping toward it) -- that would need the follower to reason about
+    obstacles independently, the same "the grid is a bad abstraction for
+    volume intersections" problem item 38 just solved for the player,
+    reappearing for free on a second actor. Instead, the follower
+    literally REPLAYS the leader's own step-direction history,
+    `trail_steps` (default 2) moves behind: every leader `move_started`
+    pushes a direction onto a queue; the follower only pops and attempts
+    the OLDEST queued direction once the queue is MORE than `trail_steps`
+    deep, so at rest exactly `trail_steps` directions sit unconsumed.
+    Consuming one move re-triggers a check for the next (via the
+    follower's own `move_finished`), so it catches back up over several
+    frames if it fell behind while the leader kept moving, rather than
+    needing a fresh nudge per remaining step. A failed `request_move()`
+    (something occupies a cell between the leader passing through and
+    the follower catching up -- possible in principle, if unlikely with
+    only these two actors in the demo) is left at the FRONT of the queue
+    rather than dropped, so the next trigger retries the same direction
+    instead of silently skipping a step and drifting off the leader's
+    actual path. The guarantee this produces is a TEMPORAL lag (the
+    follower mirrors wherever the leader was `trail_steps` of the
+    leader's OWN moves ago), not a constant spatial offset from spawn --
+    worth knowing before writing a test or a tuning pass against this
+    that assumes otherwise (a first draft of this file's own regression
+    test made exactly that wrong assumption; see the verification note
+    below).
+    Reuses `GridActor` unmodified as the follower's own movement
+    primitive (same pattern as `grid_actor_player_input.gd`: a separate
+    driver `Node`, not a GridActor subclass) -- the follower's
+    `CharacterBody3D` sits on Godot's default physics layer (1), outside
+    both `GridActor.WALL_COLLISION_LAYER_BIT`/`OBJECT_COLLISION_LAYER_BIT`
+    (item 38), so the player and the follower never obstruct each other;
+    only real walls/objects do.
+    Real bug caught before shipping, the exact ready-order class this
+    project has hit repeatedly (`sprite_actor.gd`'s old `actor` setter,
+    `debug_grid_overlay.gd`'s deferred build): `Follower._ready()`
+    originally connected to `leader.move_started` directly, but Godot
+    calls a CHILD's `_ready()` before its PARENT's -- and the parent
+    scene script (`tactical_demo_world.gd`) is what assigns `leader`, so
+    the connection attempt ran while `leader` was still null and
+    silently connected to nothing, permanently (nothing ever retried
+    it). The follower never moved at all in the first test run, caught
+    immediately rather than assumed to be a queue-logic bug. Fixed by
+    making `leader` a property SETTER that connects/reconnects whenever
+    it's actually assigned, the same fix shape `sprite_actor.gd` already
+    used for the identical problem -- correct regardless of which order
+    `_ready()` calls happen to run in.
+    Verified with a 7/7 headless suite (`verify_follower.gd`, scratchpad,
+    against the real `tactical_demo_world.tscn`): `leader`/`actor` wiring
+    resolved correctly (proving the ready-order fix), the follower's
+    queue settles back to exactly `trail_steps` entries after the leader
+    takes several steps, the follower replays exactly
+    `(steps_taken - trail_steps)` of the leader's moves (the real
+    temporal-lag guarantee, not the spatial-offset assumption the first
+    draft of this test wrongly asserted and had to be corrected), and it
+    stays on the leader's exact path (same X for a pure north walk).
+    Full scene also run headless 300 frames with the follower present,
+    no errors.
+
+41. **Interaction actions were made to actually DO something, and a jump
+    test platform was added -- two separate, real gaps flagged in the
+    same pass.** Before this: the Chest and Apple were both wired to the
+    BARE `interactable.gd` script directly (interaction_flags set from
+    the .tscn), which meant pressing F on either dispatched to the base
+    class's empty default `_on_open()`/`_on_harvest()` -- the confirm
+    panel closed and nothing else happened at all, not even a print.
+    Plant and Merchant already had real override methods, but those only
+    ever called `print()`, invisible to anyone actually playing the
+    scene rather than reading the console.
+    Fixed with three small new pieces, each scoped to what currently
+    exists rather than guessing ahead at a bigger system (same "flag it,
+    don't invent it" convention this file already follows):
+    - `core/systems/inventory/inventory.gd` (`Inventory`) -- a plain
+      item_id->amount Dictionary with `add_item()`/`remove_item()` and a
+      `changed` signal. NOT a typed Item resource system (icons, weight,
+      stacking, equip slots) -- nothing needs that yet. Attached as a
+      child of the Player only (`Player/Inventory`); handlers look it up
+      via `source.get_node_or_null("Inventory")` and no-op if absent, so
+      it's opt-in per-actor, not a hard dependency.
+    - `core/systems/feedback/game_feedback.gd` (`GameFeedback`) -- a new
+      autoload (same shape as `GameStateManager`, including the same
+      "no `class_name`, the autoload registration IS the global name"
+      reasoning) that shows one transient on-screen line, replacing bare
+      `print()` calls for anything a player should actually see happen.
+      Deliberately not a dialogue/quest-log system -- one line, replaced
+      outright by the next, auto-hides after a fixed duration.
+    - `examples/apple.gd` (`ApplePickup`) and `examples/chest.gd`
+      (`Chest`) -- new concrete `Interactable` subclasses (following the
+      exact pattern `harvestable_plant.gd`/`merchant.gd` already
+      established) replacing the bare-script wiring: Apple adds itself
+      to the picker's Inventory then `queue_free()`s (a pickup, not a
+      regrowing resource); Chest sets `one_shot = true` (previously
+      unset -- the bare script never guarded against re-looting either),
+      grants loot once, and darkens its mesh + relabels its prompt to
+      "Empty" so an already-opened chest reads as looted at a glance.
+      `harvestable_plant.gd`'s `_on_harvest()` and `merchant.gd`'s
+      `_on_talk()`/`_on_open()` were updated to call into the same two
+      new systems instead of only printing. `Merchant.wares` is new
+      real `@export` data (not a hardcoded string) specifically so a
+      future shop UI has something to read without touching this class
+      again -- opening the satchel still doesn't let you buy anything;
+      no currency/economy design exists yet, flagged rather than guessed.
+    - `core/ui/inventory_hud/inventory_hud.gd` (`InventoryHud`) -- a
+      small always-on readout of the Player's Inventory, built
+      procedurally (same spirit as `InteractionController._build_panel()`),
+      wired in `tactical_demo_world.gd`. Anchored top-RIGHT specifically
+      because `debug_grid_overlay.gd`'s (TEMPORARY, see item 25) own
+      coordinate HUD already owns the top-left corner -- confirmed by an
+      actual rendered screenshot that the two would otherwise stack
+      illegibly on top of each other before moving this one.
+    Separately, jump (item 35) is unchanged and still purely cosmetic on
+    purpose -- this did NOT give the player any real vertical movement or
+    a way to land on anything (`GridActor` still has no vertical stepping
+    at all; see the file header's verticality note). What was actually
+    missing was simpler: nothing in the demo scene had any height
+    variation to judge the jump arc against. `tactical_demo_world.gd`'s
+    new `_build_jump_test_platform()` adds one solid raised block --
+    real collision on the same wall-obstruction layer a perimeter wall
+    cell uses (so it also proves solid-object collision against
+    something taller than the Chest), positioned off both axes running
+    through the origin (same corner-placement convention Chest/Plant
+    already use) so it doesn't sit on a cardinal ray any existing
+    scripted movement test walks along.
+    Verified with a real headless smoke script (not just inspection):
+    Chest grants loot exactly once and no-ops on a second open; Apple
+    adds to inventory and is actually removed from the scene tree;
+    Plant/Merchant both still work through the new path; the jump
+    platform exists at its configured position with real collision.
+    Also verified with actual rendered screenshots (`--display-driver
+    x11 --rendering-driver opengl3`, per this project's own screenshot-
+    over-headless-assumption rule): the platform reads clearly as a
+    height cue next to the player, the on-screen feedback toast shows
+    the pickup message, and the satchel HUD updates live and does not
+    overlap the debug coordinate HUD.
+
+42. **Real playtest feedback on item 41 drove three further changes:
+    Chest became a real per-item loot picker, Merchant's satchel became
+    a real purchase, and jump got a real, bounded step-up onto short
+    ledges.** All three were explicit corrections to item 41's first
+    pass, not new requests out of nowhere -- flagged here the same way.
+    - **Chest, multi-item with player choice.** A chest holding more
+      than one kind of item used to grant everything automatically on
+      open, with no way to leave something behind. `core/ui/toggle_list_window/`
+      is new: `ToggleListWindow` (base class -- owns the pause request,
+      procedural panel, and F/Esc/1-9 input handling) with two thin
+      subclasses, `LootWindow` and `ShopWindow`, both new autoloads (see
+      project.godot). Opening a Chest now shows every item it holds with
+      a `[1] [x] Gold Coin x5`-style checkbox row (all CHECKED by
+      default -- looting is free, "take everything" is the sane
+      default); confirming grants only what's still checked and leaves
+      the rest in `Chest.loot` for a later visit. `one_shot` was dropped
+      from `chest.gd` entirely -- whether it can still be opened is now
+      "is `loot` empty," checked directly, since a partially-looted chest
+      must still be re-openable.
+    - **Merchant's satchel is a real purchase now, not just a wares
+      list.** `Merchant.wares` changed from a flavor-only
+      `Array[String]` to a real `item_id -> price` `Dictionary`;
+      opening the satchel shows a `ShopWindow` (everything UNCHECKED by
+      default -- the opposite default from LootWindow, deliberately,
+      since buying costs currency). Spends the same `"gold_coin"` item
+      id Chest already grants by default (`ShopWindow.CURRENCY_ITEM_ID`)
+      -- a chest's loot is actually spendable here with no separate
+      currency-conversion step. Charges each checked row independently
+      as it goes, not an all-or-nothing up-front affordability check --
+      a row that can't be covered when it's reached is silently skipped
+      (not bought), and the feedback message reports both what was
+      bought and what was skipped for insufficient funds. Still no
+      sell-back, restocking, or haggling -- a real economy design is a
+      future decision, not guessed at here.
+    - **A real mutual-exclusion gap surfaced building the two windows
+      above, caught before shipping, not discovered live:**
+      `InteractionController` releases its OWN pause request and closes
+      its confirm panel BEFORE calling `target.interact(source)` (see
+      `_confirm_interaction()`), so by the time a Chest/Merchant opens a
+      LootWindow/ShopWindow, `is_interacting` is already false but the
+      tree is now paused for a DIFFERENT reason. Both
+      `InteractionController._process()` (rescanning for a nearest
+      target) and `_unhandled_input()` (F/Esc/number keys) now bail out
+      whenever `not is_interacting and get_tree().paused` -- i.e.
+      whenever some OTHER `PROCESS_MODE_ALWAYS` system currently has
+      focus -- so pressing F to confirm a loot/purchase can't also,
+      simultaneously, start an unrelated new interaction on whatever
+      target happened to be nearest before the window opened.
+    - **Jump got a real, bounded step-up/step-down** --
+      `GridActor.request_jump_step()`, wired to the same jump key
+      alongside (not replacing) `sprite_actor.gd`'s existing, unchanged
+      purely-cosmetic hop arc. `Ledge` (`ledge.gd`, new) is a declarative
+      walkable-footprint marker (height + X/Z size, NOT physics-probed --
+      same "flag it, don't invent it" reasoning as the rest of this
+      file) -- `tactical_demo_world.gd`'s jump-test platform now carries
+      one, built from the SAME local variables as its visual mesh and
+      collision box so the three can't drift apart. `GridActor` gained
+      `current_ground_height` (world-space Y the actor currently stands
+      at; 0.0 everywhere except on a Ledge) and `_current_ledge`
+      (which one, if any); `request_move()` (plain WASD) only ever
+      READS these -- it operates at whatever height the actor is
+      currently at, and while on a ledge, REFUSES to step outside that
+      ledge's own footprint (treated exactly like an obstruction: face
+      the direction, don't move) -- leaving a ledge requires the
+      deliberate jump key, never a walk off the edge into open air with
+      no floor under it. `request_jump_step()` is the ONLY thing that
+      ever changes `current_ground_height`: from the base floor it can
+      step UP onto a Ledge directly ahead if the height difference is
+      within `max_step_height` and there's room to stand there (checked
+      with the same real physics shape-query `request_move()` already
+      used, just at the candidate height); while ON a ledge it can only
+      step back DOWN to the base floor, by stepping outside the ledge's
+      footprint. Explicitly NOT a general climbing/multi-story
+      verticality system -- no ledge-to-ledge hops, no stacking, exactly
+      one Ledge exists in this framework right now. `step_to_world()`/
+      `current_step` themselves are UNCHANGED (`current_step.y` still
+      always 0) -- the new Y state lives entirely alongside them in
+      `current_ground_height`, not inside the step lattice, specifically
+      so every existing flat-ground behavior/regression stays untouched
+      wherever a Ledge isn't involved.
+    Verified with a real headless script exercising the actual scene
+    (not a synthetic stand-in): a chest with three item types lets a
+    specific item be left unchecked and taken later on a second visit;
+    a merchant purchase correctly fails with insufficient gold and
+    succeeds (deducting exactly the right amount) once funded; plain
+    `request_move()` toward the jump platform is rejected while
+    `request_jump_step()` in the same direction succeeds and lands
+    EXACTLY at the ledge's declared height; walking around ON TOP of the
+    platform works within its footprint and is blocked at its edge;
+    jumping back off from the edge returns the actor to exactly Y=0.0.
+    Also verified with real rendered screenshots
+    (`--display-driver x11 --rendering-driver opengl3`): the loot
+    window's checkbox rows and Satchel HUD update correctly on screen,
+    and a before/after pair visually confirms the player standing on
+    the floor next to the platform vs. standing on top of it after one
+    jump-key press. Full scene also re-run 300 frames headless with the
+    new autoloads present, no errors.
 
 ## Try it
 

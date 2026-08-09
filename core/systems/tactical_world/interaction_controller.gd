@@ -25,8 +25,8 @@
 # Viewing range is measured in steps (finer-grained, matches how far you
 # can actually see); interaction range is measured in CELLS, not steps.
 # That's not an arbitrary choice: solid Interactables (see
-# Interactable.blocks_movement / GridActor._is_object_obstructed_step) occupy
-# their whole cell as non-passable space, so the closest the player can
+# Interactable.blocks_movement / occupies_full_cell) occupy their whole
+# cell as non-passable space by default, so the closest the player can
 # ever actually stand next to one is the adjacent cell -- which is 2
 # steps away at the current step_distance=0.5/cell_size=1.0 tuning, not
 # 1. Checking cell-adjacency directly (rather than hardcoding "2 steps")
@@ -43,17 +43,45 @@
 # (PROCESS_MODE_PAUSABLE / INHERIT), which is what actually stops them
 # when GameStateManager sets get_tree().paused true -- no per-script
 # pause checks scattered elsewhere.
+#
+# MULTI-TYPE TARGETS (Interactable.interaction_flags with more than one
+# bit set -- a Merchant with both TALK and OPEN, say): the world-space
+# label above the object still only ever shows ONE action (its
+# primary_interaction_type()), same as a single-type object -- the
+# floating nameplate has no room to list several verbs and doesn't try.
+# The DIFFERENCE surfaces once an interaction session actually begins:
+# begin_interaction() reads every OTHER active type off the target
+# (Interactable.active_interaction_types(), minus the primary) into
+# _current_secondary_types, and the confirm panel lists one extra line
+# per secondary action, numbered 1-9 -- the same numbered-key vocabulary
+# the hotbar already uses. F still always confirms the primary action,
+# unchanged from a single-type target's behavior; a secondary action
+# needs its number pressed explicitly. A target with zero secondary
+# types (every existing single-type object) gets exactly the
+# `[F] Verb  [Esc] Cancel` panel this always showed.
 
 extends Node
 class_name InteractionController
 
 @export var player: GridActor
 @export var grid_map: GridMap
-## Which GridMap item ids block line of sight. Matches the wall id(s)
-## GridActor's obstacle_item_ids uses for movement blocking -- kept as a
-## separate export rather than reading player.obstacle_item_ids so this
-## controller doesn't assume a particular actor is wired first.
+## Which GridMap item ids block line of sight. GridActor no longer
+## reads the GridMap for movement blocking at all (obstruction is a
+## native physics query now -- see grid_actor.gd's file header), so this
+## is independent, scene-authored data, not something read off `player`
+## anymore; whoever wires this controller up (tactical_demo_world.gd)
+## is responsible for keeping it in sync with whatever id its own wall
+## cells actually use.
 @export var wall_item_ids: PackedInt32Array = [1]
+## Where walls live relative to the layer this LOS check samples, in
+## GridMap cell units -- e.g. Vector3i(0, 1, 0) if walls are painted on
+## a different GridMap y-layer than the floor. Left at zero (the
+## default), walls are assumed to occupy the same layer LOS sampling
+## already looks at. Formerly read from GridActor.wall_layer_offset
+## (removed along with GridActor's whole GridMap-based obstruction
+## path); relocated here since LOS sampling is now the only remaining
+## GridMap-cell consumer in this framework.
+@export var wall_layer_offset: Vector3i = Vector3i.ZERO
 
 @export var viewing_range_steps := 10.0
 @export var interact_key: Key = KEY_F
@@ -71,6 +99,11 @@ var is_interacting := false
 var _current_target: Interactable
 var _current_source: Node
 var _nearest_valid_target: Interactable
+## Every active InteractionType on _current_target OTHER than the one
+## the panel's [F] line already covers -- see the file header's
+## "MULTI-TYPE TARGETS" note. Populated in begin_interaction(), cleared
+## in end_interaction(); index i here is what key (i+1) confirms.
+var _current_secondary_types: Array[Interactable.InteractionType] = []
 var _panel: CanvasLayer
 var _panel_name_label: Label
 var _panel_hint_label: Label
@@ -85,6 +118,14 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if is_interacting:
 		return  # frozen on purpose -- see file header
+	if get_tree().paused:
+		# Paused for a reason that ISN'T this controller's own interaction
+		# session (is_interacting already handled that case above) --
+		# another PROCESS_MODE_ALWAYS system (a LootWindow/ShopWindow, see
+		# toggle_list_window.gd's file header) has focus right now. Don't
+		# keep rescanning for/highlighting a nearest target while that has
+		# the player's actual attention.
+		return
 	if player == null:
 		return
 	_nearest_valid_target = null
@@ -124,7 +165,8 @@ func _update_label(interactable: Interactable) -> void:
 	var cell_manhattan := absi(cell_dx) + absi(cell_dz)
 
 	if cell_manhattan == 1:
-		interactable.label.show_action(interactable.display_name, interactable.interaction_prompt, OS.get_keycode_string(interact_key))
+		var primary := interactable.primary_interaction_type()
+		interactable.label.show_action(interactable.display_name, interactable.prompt_for(primary), OS.get_keycode_string(interact_key))
 		if _nearest_valid_target == null:
 			_nearest_valid_target = interactable
 	else:
@@ -153,24 +195,25 @@ func _has_line_of_sight(from: Vector3, to: Vector3) -> bool:
 		# rounded away from y-index 0 -- the ONLY layer walls are ever
 		# placed on -- and the wall is silently missed. Walls live on a
 		# single known layer regardless of the target's height; LOS is a
-		# floor-plan (X/Z) question, matching grid_actor.gd's
-		# _is_object_obstructed_step()'s identical "X/Z only,
-		# deliberately" reasoning for the same underlying cause.
+		# floor-plan (X/Z) question, the same "X/Z only, deliberately"
+		# reasoning Interactable's own occupies_full_cell collision (see
+		# interactable.gd's _build_collision_body()) uses for the
+		# identical underlying cause.
 		point.y = from.y
 		# player.world_to_cell(), NOT grid_map.local_to_map() -- confirmed
-		# empirically (raycast against the wall's real collision shape,
-		# see grid_actor.gd's step_to_cell() doc comment) that
+		# empirically (raycast against the wall's real collision shape) that
 		# local_to_map() does NOT respect this project's
 		# cell_center_x/y/z = false setting: it stays floor-based
 		# regardless, disagreeing with where a wall ACTUALLY, physically
-		# sits by up to half a cell. Using the same mapping GridActor
-		# itself uses for movement blocking means "can I see it" and
-		# "can I walk there" can never disagree about where a wall is.
-		# Same pre-existing assumption GridActor's own wall check makes:
-		# this GridMap sits at an identity transform (no to_local()
-		# conversion), not a new gap introduced here.
+		# sits by up to half a cell. GridActor no longer uses cell lookups
+		# for movement blocking at all (see its file header -- obstruction
+		# is a native physics query now), but world_to_cell() is still the
+		# one geometry-correct GridMap<->world mapping this project trusts,
+		# so LOS keeps using it rather than reintroducing local_to_map()'s
+		# disagreement. This GridMap sits at an identity transform (no
+		# to_local() conversion), not a new gap introduced here.
 		var cell := player.world_to_cell(point)
-		var check_cell := cell + player.wall_layer_offset
+		var check_cell := cell + wall_layer_offset
 		var item := grid_map.get_cell_item(check_cell)
 		if item != GridMap.INVALID_CELL_ITEM and wall_item_ids.has(item):
 			return false
@@ -180,16 +223,44 @@ func _has_line_of_sight(from: Vector3, to: Vector3) -> bool:
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
+	# Same reasoning as the identical check in _process() above -- not
+	# repeated here as a call to a shared helper only because a guard
+	# clause reads more plainly than threading a bool through two
+	# differently-shaped functions for one condition.
+	if not is_interacting and get_tree().paused:
+		return
+	var key_event := event as InputEventKey
 
-	if event.keycode == interact_key:
+	if key_event.keycode == interact_key:
 		if is_interacting:
 			_confirm_interaction()
 		elif _nearest_valid_target:
 			begin_interaction(player, _nearest_valid_target)
 		get_viewport().set_input_as_handled()
-	elif event.keycode == cancel_key and is_interacting:
+	elif key_event.keycode == cancel_key and is_interacting:
 		cancel_interaction()
 		get_viewport().set_input_as_handled()
+	elif is_interacting:
+		# Secondary actions on a multi-type target -- see the file
+		# header's "MULTI-TYPE TARGETS" note. A single-type target's
+		# _current_secondary_types is always empty, so this branch is a
+		# no-op for every interaction this framework had before
+		# interaction_flags existed.
+		var index := _secondary_action_index_for_keycode(key_event.keycode)
+		if index != -1:
+			_confirm_secondary_action(index)
+			get_viewport().set_input_as_handled()
+
+
+## KEY_1..KEY_9 -> index 0..8, matching the numbering _show_panel()
+## prints ("[1] Open Satchel" confirms index 0). Anything else, or an
+## index beyond however many secondary actions the current target
+## actually has, returns -1 -- _confirm_secondary_action() itself also
+## bounds-checks, so this is a convenience, not the only guard.
+func _secondary_action_index_for_keycode(keycode: Key) -> int:
+	if keycode >= KEY_1 and keycode <= KEY_9:
+		return keycode - KEY_1
+	return -1
 
 
 ## Called by (or on behalf of) the player. Does nothing if an
@@ -201,6 +272,16 @@ func begin_interaction(source: Node, target: Interactable) -> void:
 	is_interacting = true
 	_current_target = target
 	_current_source = source
+
+	# Every active type on `target` except the one the panel's [F] line
+	# already covers -- see the file header's "MULTI-TYPE TARGETS" note.
+	# Always empty for a single-type target (active_interaction_types()
+	# returns exactly one entry, which IS the primary).
+	var primary := target.primary_interaction_type()
+	_current_secondary_types.clear()
+	for type in target.active_interaction_types():
+		if type != primary:
+			_current_secondary_types.append(type)
 
 	# Turn to face what's being interacted with, even though no step is
 	# being taken to reach it -- real, reported problem: walk up to a
@@ -230,9 +311,11 @@ func begin_interaction(source: Node, target: Interactable) -> void:
 	_show_panel(target)
 
 
-## Completes the interaction: runs the target's actual effect (opens
-## the chest, harvests the plant, ...), then resumes the world. Distinct
-## from cancel_interaction(), which resumes WITHOUT running the effect.
+## Completes the interaction: runs the target's PRIMARY effect (opens
+## the chest, harvests the plant, talks to the merchant, ...), then
+## resumes the world. Distinct from cancel_interaction(), which resumes
+## WITHOUT running any effect. For a secondary action on a multi-type
+## target, see _confirm_secondary_action() instead.
 func _confirm_interaction() -> void:
 	if not is_interacting:
 		return
@@ -241,6 +324,24 @@ func _confirm_interaction() -> void:
 	end_interaction()
 	if target:
 		target.interact(source)
+
+
+## Completes the interaction by running one of the target's SECONDARY
+## effects instead of its primary one -- see the file header's
+## "MULTI-TYPE TARGETS" note. `index` is into _current_secondary_types
+## as it stood when the panel was built; out-of-range (a stale number
+## key press after the target's flags somehow changed mid-session, or
+## just a number with nothing behind it) is a documented no-op, same as
+## Interactable.interact() itself no-op'ing on a type that isn't active.
+func _confirm_secondary_action(index: int) -> void:
+	if not is_interacting or index < 0 or index >= _current_secondary_types.size():
+		return
+	var target := _current_target
+	var source := _current_source
+	var type := _current_secondary_types[index]
+	end_interaction()
+	if target:
+		target.interact(source, type)
 
 
 ## Resumes world simulation without performing the target's action.
@@ -257,6 +358,7 @@ func end_interaction() -> void:
 	is_interacting = false
 	_current_target = null
 	_current_source = null
+	_current_secondary_types.clear()
 	# Releases ONLY this controller's own request -- if some other
 	# system also has an active pause request right now, the tree stays
 	# paused, correctly, until that other request is released too. This
@@ -277,14 +379,23 @@ func _build_panel() -> void:
 	box.process_mode = Node.PROCESS_MODE_ALWAYS
 	box.anchor_left = 0.5
 	box.anchor_right = 0.5
-	box.anchor_top = 1.0
-	box.anchor_bottom = 1.0
 	box.offset_left = -160
 	box.offset_right = 160
-	box.offset_top = -170
+	# Bottom edge pinned 100px above the screen bottom; top edge left to
+	# the container's own minimum size and grows UPWARD from there
+	# (GROW_DIRECTION_BEGIN) instead of a hand-picked fixed height. A
+	# fixed-height box (the previous approach: offset_top=-170,
+	# offset_bottom=-100, always exactly 70px) was fine for the single
+	# "[F] Verb  [Esc] Cancel" line every target used to show, but a
+	# multi-type target's hint label (see _show_panel() below) can now
+	# be several lines tall -- sizing to content is what keeps that from
+	# silently overflowing a box that was never resized to fit it.
+	box.anchor_top = 1.0
+	box.anchor_bottom = 1.0
+	box.offset_top = -100
 	box.offset_bottom = -100
 	box.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	box.grow_vertical = Control.GROW_DIRECTION_BOTH
+	box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_panel.add_child(box)
 
 	var vbox := VBoxContainer.new()
@@ -304,12 +415,23 @@ func _build_panel() -> void:
 	_panel.visible = false
 
 
+## _current_secondary_types must already be populated (begin_interaction()
+## does this before calling here) -- one hint line for the primary
+## action, one more per secondary action (numbered 1-9, matching
+## _secondary_action_index_for_keycode()), then Cancel last. A
+## single-type target (the common case, unchanged from before
+## interaction_flags existed) always has zero secondary lines, so this
+## produces exactly the old two-part "[F] Verb    [Esc] Cancel" text.
 func _show_panel(target: Interactable) -> void:
 	_panel_name_label.text = target.display_name
-	_panel_hint_label.text = "[%s] %s    [%s] Cancel" % [
-		OS.get_keycode_string(interact_key), target.interaction_prompt,
-		OS.get_keycode_string(cancel_key),
-	]
+
+	var lines := PackedStringArray()
+	lines.append("[%s] %s" % [OS.get_keycode_string(interact_key), target.prompt_for(target.primary_interaction_type())])
+	for i in range(_current_secondary_types.size()):
+		lines.append("[%d] %s" % [i + 1, target.prompt_for(_current_secondary_types[i])])
+	lines.append("[%s] Cancel" % OS.get_keycode_string(cancel_key))
+	_panel_hint_label.text = "\n".join(lines)
+
 	_panel.visible = true
 
 
