@@ -1,9 +1,80 @@
-[gd_scene format=3 uid="uid://d0baq01i8j1j5"]
+[gd_scene load_steps=13 format=3]
 
-[node name="Control" type="Control" unique_id=76374238]
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+[ext_resource type="Script" path="res://core/akashic.gd" id="1_shell"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/tactical_camera.gd" id="2_camera"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/grid_actor.gd" id="3_actor"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/grid_actor_player_input.gd" id="4_input"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/sprite_actor.gd" id="5_sprite"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/ground_shadow.gd" id="6_shadow"]
+[ext_resource type="Script" path="res://core/systems/inventory/inventory.gd" id="7_inventory"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/camera_mode_controller.gd" id="8_modes"]
+[ext_resource type="Script" path="res://core/systems/world/transition_coordinator.gd" id="9_transition"]
+[ext_resource type="Script" path="res://core/ui/inventory_hud/inventory_hud.gd" id="10_hud"]
+[ext_resource type="PackedScene" path="res://core/ui/hotbar/hotbar_container.tscn" id="11_hotbar"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/stand.png" id="12_idle"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/run.png" id="13_run"]
+[ext_resource type="Texture2D" path="res://core/assets/proof_sprites/player/jump.png" id="14_jump"]
+
+[sub_resource type="Environment" id="Environment_world"]
+background_mode = 1
+background_color = Color(0.18, 0.22, 0.3, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.72, 0.75, 0.82, 1)
+ambient_light_energy = 0.75
+
+[sub_resource type="CapsuleShape3D" id="PlayerShape"]
+radius = 0.4
+height = 1.6
+
+[node name="Akashic" type="Node"]
+script = ExtResource("1_shell")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_world")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-50, -35, 0)
+shadow_enabled = true
+
+[node name="RoomContainer" type="Node3D" parent="."]
+
+[node name="Player" type="CharacterBody3D" parent="."]
+script = ExtResource("3_actor")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
+position = Vector3(0, 0.8, 0)
+shape = SubResource("PlayerShape")
+
+[node name="VisualRoot" type="Node3D" parent="Player"]
+
+[node name="SpriteActor" type="Node3D" parent="Player/VisualRoot"]
+script = ExtResource("5_sprite")
+idle_texture = ExtResource("12_idle")
+run_texture = ExtResource("13_run")
+jump_texture = ExtResource("14_jump")
+
+[node name="GroundShadow" type="Node3D" parent="Player/VisualRoot"]
+script = ExtResource("6_shadow")
+
+[node name="PlayerInput" type="Node" parent="Player"]
+script = ExtResource("4_input")
+
+[node name="Inventory" type="Node" parent="Player"]
+script = ExtResource("7_inventory")
+
+[node name="TacticalCameraRig" type="Node3D" parent="."]
+script = ExtResource("2_camera")
+
+[node name="CameraModeController" type="Node" parent="."]
+script = ExtResource("8_modes")
+
+[node name="TransitionCoordinator" type="Node" parent="."]
+script = ExtResource("9_transition")
+
+[node name="InventoryHud" type="CanvasLayer" parent="."]
+script = ExtResource("10_hud")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="HotbarContainer" parent="UI" instance=ExtResource("11_hotbar")]
+anchors_preset = 7

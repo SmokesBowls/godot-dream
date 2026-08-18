@@ -1,0 +1,65 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="Script" path="res://core/systems/world/world_room.gd" id="1_room"]
+[ext_resource type="Script" path="res://core/systems/world/room_entrance.gd" id="2_entrance"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/interaction_controller.gd" id="3_interaction"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/interactable.gd" id="4_interactable"]
+
+[sub_resource type="StandardMaterial3D" id="FloorMaterial"]
+albedo_color = Color(0.27, 0.43, 0.3, 1)
+roughness = 0.9
+
+[sub_resource type="BoxMesh" id="FloorMesh"]
+material = SubResource("FloorMaterial")
+size = Vector3(10, 0.1, 8)
+
+[sub_resource type="BoxShape3D" id="FloorShape"]
+size = Vector3(10, 0.1, 8)
+
+[sub_resource type="StandardMaterial3D" id="ProofMaterial"]
+albedo_color = Color(0.92, 0.72, 0.24, 1)
+
+[sub_resource type="CylinderMesh" id="ProofMesh"]
+material = SubResource("ProofMaterial")
+top_radius = 0.3
+bottom_radius = 0.3
+height = 1.2
+
+[node name="RoomB" type="Node3D"]
+script = ExtResource("1_room")
+room_id = &"room_b"
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.05, 0)
+mesh = SubResource("FloorMesh")
+
+[node name="FloorBody" type="StaticBody3D" parent="."]
+position = Vector3(0, -0.05, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FloorBody"]
+shape = SubResource("FloorShape")
+
+[node name="GridMap" type="GridMap" parent="."]
+cell_size = Vector3(1, 0.1, 1)
+
+[node name="InteractionController" type="Node" parent="."]
+script = ExtResource("3_interaction")
+
+[node name="WestEntrance" type="Marker3D" parent="."]
+position = Vector3(-3.25, 0, 0)
+rotation = Vector3(0, 0.35, 0)
+script = ExtResource("2_entrance")
+entrance_id = &"west_entrance"
+
+[node name="InteractionProof" type="Node3D" parent="."]
+position = Vector3(-2, 0, -0.5)
+script = ExtResource("4_interactable")
+interaction_flags = 1
+display_name = "Room B Marker"
+interaction_prompt = "Examine"
+blocks_movement = false
+label_height_offset = 1.0
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="InteractionProof"]
+position = Vector3(0, 0.6, 0)
+mesh = SubResource("ProofMesh")

@@ -1,11 +1,20 @@
-# Dream World Boundary 1 — RED test slice
+# Dream World Boundary 1 — contract test authority
 
-This directory holds `DREAM_WORLD_BOUNDARY_1_TEST_RED`: the test-only
-slice authorized against `DREAM_WORLD_BOUNDARY_1_CONTRACT.md` (v1.0,
-frozen at commit `b17937e`). It **tests the frozen contract; it does
-not implement it.** No `TransitionCoordinator`, `Exit`, in-memory
-room-state store, or Room A/B fixture exists yet, and this slice does
-not create any of them — that remains unauthorized.
+This directory began as `DREAM_WORLD_BOUNDARY_1_TEST_RED`, the test-only
+slice frozen against `DREAM_WORLD_BOUNDARY_1_CONTRACT.md` v1.0.
+
+Historical boundaries:
+
+```text
+b17937e  contract frozen; implementation not begun
+2ff8945  test-only RED; 5 PASS, 0 FAIL, 26 BLOCKED
+```
+
+`DREAM_WORLD_BOUNDARY_1_MINIMAL_TRANSITION_GREEN` was subsequently
+authorized. The same runner now converts only the executable A → B
+transition-lifecycle requirements into PASS/FAIL evidence. Requirements
+owned by the later room-state and live-GUI slices remain explicitly
+BLOCKED rather than being pulled into this implementation.
 
 ## Run it
 
@@ -13,34 +22,56 @@ not create any of them — that remains unauthorized.
 godot --headless -s res://tests/dream_world_boundary_1/run_boundary_1_red.gd
 ```
 
-## What it checks
+The filename preserves the historical RED authority. It is not a claim
+that the complete milestone is green.
 
-- **Non-goal guards (PASS today):** confirms the repo hasn't jumped
-  ahead of the contract — no `TransitionCoordinator`/`Exit`/room-state
-  store implementation, no `room_a`/`room_b` fixtures, and
-  `akashic.tscn` still carries no script (§2, §3.4, §3.5, §4).
-- **§15 acceptance proof checklist (BLOCKED today):** every numbered
-  step of the required positive proof, each tied to the exact contract
-  clause it comes from.
-- **§16 toxic/refusal proof checklist (BLOCKED today):** all nine
-  fail-closed cases (§16.1–§16.9), same treatment.
-- **Expressibility blockers:** contract clauses this slice could not
-  even encode as a runnable test without inventing an unauthorized
-  implementation detail on the contract's behalf (see the runner's
-  printed report for the current list — currently §4/§5 naming, §17's
-  GUI-evidence exclusion, and §13's not-yet-defined chest loot schema).
+## What is executable in minimal transition GREEN
 
-## Current result (last verified run)
+- persistent runtime shell composition;
+- immutable semantic `TransitionRequest` value behavior;
+- semantic room, exit, and entrance identities;
+- same `Player` and `Inventory` object identities across A → B;
+- persistent `TacticalCameraRig` and `CameraModeController` bindings;
+- room-local `InteractionController` replacement and rebinding;
+- optional room-local `GridMap` validation and rebinding when present;
+- destination staging before Room A teardown;
+- missing resource, missing/duplicate/non-finite/singular entrance, invalid final
+  composed transform, mismatched or nested room identity, missing local controller,
+  and stale source refusal;
+- staged-room inactivity on refusal;
+- interaction, loot, and shop modal refusal without forced closure, including
+  modal state opened synchronously by a transition callback;
+- coordinator-owned transition pause and independent pause preservation;
+- exact authored named-entrance Transform3D placement, including a
+  non-grid-aligned entrance;
+- movement and interaction after arrival in Room B;
+- persistent inventory HUD and hotbar bindings.
 
-```
-PASS:    5
+## Intentionally still BLOCKED
+
+Exactly 11 requirements remain outside this slice:
+
+- §15.3–§15.5: Room A apple/chest consequence setup;
+- §15.10: complete GUI presentation proof in Room B;
+- §15.11–§15.16: B → A return, identity after round trip, exact apple and
+  chest restoration, and post-return live behavior;
+- §16.9: stateful-object identity collision validation.
+
+Those blockers belong to the room-state GREEN and later live Godot proof.
+They are not failures of minimal A → B GREEN.
+
+## Current selective result
+
+Last verified after the minimal implementation:
+
+```text
+PASS:    57
 FAIL:    0
-BLOCKED: 26 (expected — §1: implementation not authorized)
+BLOCKED: 11 (intentional later-slice requirements)
+SLICE:   GREEN
+MILESTONE: incomplete until deferred room-state/live proofs run
 ```
 
-Exit code `1`. This is the correct RED result: every BLOCKED case is
-expected to flip to executable once a future, separately authorized
-implementation slice creates the entities the contract's ownership
-sections (§3–§5) reserve. A green run of this file, today, without
-those entities existing, would itself be evidence something was
-implemented without authorization.
+Exit code is `0` when every currently authorized executable check passes.
+The runner continues to print the eleven deferred blockers so a selective
+GREEN cannot be mistaken for completion of Dream World Boundary 1.

@@ -150,6 +150,9 @@ signal facing_changed(direction: Vector2i)
 ## actor's actual position instead.
 var current_step: Vector3i
 var is_moving := false
+## XZ translation of this actor's current movement lattice. Normally zero;
+## a semantic room entrance may establish an authored non-grid-aligned origin.
+var _step_world_offset := Vector3.ZERO
 
 ## World-space Y this actor is currently standing at. 0.0 (the default)
 ## everywhere in the world except while standing on a Ledge (see
@@ -235,6 +238,31 @@ func _ready() -> void:
 	current_step = world_to_step(global_position)
 	global_position = step_to_world(current_step)
 	_find_probe_shape()
+
+
+## Transition placement must reset both the visible body and GridActor's
+## discrete movement origin. Assigning global_transform alone would leave
+## current_step in the previous room and make the next accepted move jump
+## back toward that stale lattice location.
+func place_at_world_transform(destination: Transform3D) -> void:
+	is_moving = false
+	_move_t = 0.0
+	_current_ledge = null
+	# Resolve the nearest logical step on the unshifted lattice, then translate
+	# that lattice so this exact authored entrance becomes its origin. Future
+	# steps retain their full step_distance without rounding arrival.
+	_step_world_offset = Vector3.ZERO
+	current_step = world_to_step(destination.origin)
+	var unshifted_step_position := step_to_world(current_step)
+	_step_world_offset = Vector3(
+		destination.origin.x - unshifted_step_position.x,
+		0.0,
+		destination.origin.z - unshifted_step_position.z,
+	)
+	global_transform = destination
+	current_ground_height = destination.origin.y
+	_move_from = destination.origin
+	_move_to = destination.origin
 
 
 ## Deliberately NOT exported as its own field to hand-configure -- this
@@ -450,15 +478,16 @@ func current_cell() -> Vector3i:
 
 
 func world_to_step(world_pos: Vector3) -> Vector3i:
+	var local_pos := world_pos - _step_world_offset
 	return Vector3i(
-		roundi(world_pos.x / step_distance),
-		roundi(world_pos.y / step_distance),
-		roundi(world_pos.z / step_distance)
+		roundi(local_pos.x / step_distance),
+		roundi(local_pos.y / step_distance),
+		roundi(local_pos.z / step_distance)
 	)
 
 
 func step_to_world(step: Vector3i) -> Vector3:
-	return Vector3(step.x * step_distance, step.y * step_distance, step.z * step_distance)
+	return Vector3(step.x * step_distance, step.y * step_distance, step.z * step_distance) + _step_world_offset
 
 
 ## Snaps a continuous world-space XZ vector to the nearest of the 8 grid

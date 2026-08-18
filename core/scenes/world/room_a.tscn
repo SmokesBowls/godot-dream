@@ -1,0 +1,66 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="Script" path="res://core/systems/world/world_room.gd" id="1_room"]
+[ext_resource type="Script" path="res://core/systems/world/room_entrance.gd" id="2_entrance"]
+[ext_resource type="Script" path="res://core/systems/world/room_exit.gd" id="3_exit"]
+[ext_resource type="Script" path="res://core/systems/tactical_world/interaction_controller.gd" id="4_interaction"]
+
+[sub_resource type="StandardMaterial3D" id="FloorMaterial"]
+albedo_color = Color(0.22, 0.3, 0.46, 1)
+roughness = 0.9
+
+[sub_resource type="BoxMesh" id="FloorMesh"]
+material = SubResource("FloorMaterial")
+size = Vector3(10, 0.1, 8)
+
+[sub_resource type="BoxShape3D" id="FloorShape"]
+size = Vector3(10, 0.1, 8)
+
+[sub_resource type="BoxShape3D" id="ExitShape"]
+size = Vector3(0.8, 2, 2)
+
+[sub_resource type="StandardMaterial3D" id="ExitMaterial"]
+albedo_color = Color(0.25, 0.85, 1, 0.55)
+transparency = 1
+
+[sub_resource type="BoxMesh" id="ExitMesh"]
+material = SubResource("ExitMaterial")
+size = Vector3(0.2, 1.5, 1.5)
+
+[node name="RoomA" type="Node3D"]
+script = ExtResource("1_room")
+room_id = &"room_a"
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.05, 0)
+mesh = SubResource("FloorMesh")
+
+[node name="FloorBody" type="StaticBody3D" parent="."]
+position = Vector3(0, -0.05, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FloorBody"]
+shape = SubResource("FloorShape")
+
+[node name="GridMap" type="GridMap" parent="."]
+cell_size = Vector3(1, 0.1, 1)
+
+[node name="InteractionController" type="Node" parent="."]
+script = ExtResource("4_interaction")
+
+[node name="StartEntrance" type="Marker3D" parent="."]
+position = Vector3(0, 0, 2)
+script = ExtResource("2_entrance")
+entrance_id = &"start_entrance"
+
+[node name="EastExit" type="Area3D" parent="."]
+position = Vector3(4, 1, 0)
+script = ExtResource("3_exit")
+exit_id = &"east_exit"
+destination_room_id = &"room_b"
+destination_entrance_id = &"west_entrance"
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="EastExit"]
+shape = SubResource("ExitShape")
+
+[node name="Marker" type="MeshInstance3D" parent="EastExit"]
+mesh = SubResource("ExitMesh")
