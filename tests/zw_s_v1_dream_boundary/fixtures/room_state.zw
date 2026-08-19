@@ -1,0 +1,18 @@
+{room_state
+  {room_id room_a}
+  {objects [
+    {state
+      {id apple_01}
+      {type pickup}
+      {collected true}
+    }
+    {state
+      {id chest_01}
+      {type chest}
+      {remaining_loot
+        {health_potion 1}
+        {rope 1}
+      }
+    }
+  ]}
+}
