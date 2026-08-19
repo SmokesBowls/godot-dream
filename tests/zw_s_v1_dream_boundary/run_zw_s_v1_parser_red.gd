@@ -193,9 +193,18 @@ func _run_success_matrix() -> void:
 
 	var first := _parse(ROOM_STATE_SOURCE)
 	var second := _parse(ROOM_STATE_SOURCE)
-	_check("R10 identical input produces deterministic identical outcome",
-		_subject != null and _is_success(first) and first == second,
-		"repeated parse outcomes differ or no conformant parser is available")
+	var malformed_source := "{npc {id GUARD}}\n{broken\n"
+	var failed_first := _parse(malformed_source)
+	var failed_second := _parse(malformed_source)
+	_check("R10 identical valid and rejected inputs produce deterministic outcomes",
+		_subject != null
+		and _is_success(first)
+		and first == second
+		and _key_order_signature(first.get("projection")) == _key_order_signature(second.get("projection"))
+		and _room_key_order_is_exact(first.get("projection"))
+		and _is_closed_failure(failed_first)
+		and failed_first == failed_second,
+		"projection values/key order or rejected diagnostics differ across identical inputs")
 	print("")
 
 
@@ -295,6 +304,46 @@ func _contains_key_recursive(value: Variant, key: String) -> bool:
 			if _contains_key_recursive(child, key):
 				return true
 	return false
+
+
+func _key_order_signature(value: Variant) -> Variant:
+	if value is Dictionary:
+		var keys: Array = value.keys()
+		var children := []
+		for key in keys:
+			children.append(_key_order_signature(value[key]))
+		return {"keys": keys, "children": children}
+	if value is Array:
+		var array_children := []
+		for child in value:
+			array_children.append(_key_order_signature(child))
+		return array_children
+	return typeof(value)
+
+
+func _room_key_order_is_exact(projection: Variant) -> bool:
+	if not projection is Dictionary or projection.keys() != ["room_state"]:
+		return false
+	var room: Variant = projection.get("room_state")
+	if not room is Dictionary or room.keys() != ["room_id", "objects"]:
+		return false
+	var objects: Variant = room.get("objects")
+	if not objects is Array or objects.size() != 2:
+		return false
+	var apple_wrapper: Variant = objects[0]
+	var chest_wrapper: Variant = objects[1]
+	if not apple_wrapper is Dictionary or apple_wrapper.keys() != ["state"]:
+		return false
+	if not chest_wrapper is Dictionary or chest_wrapper.keys() != ["state"]:
+		return false
+	var apple: Variant = apple_wrapper.get("state")
+	var chest: Variant = chest_wrapper.get("state")
+	if not apple is Dictionary or apple.keys() != ["id", "type", "collected"]:
+		return false
+	if not chest is Dictionary or chest.keys() != ["id", "type", "remaining_loot"]:
+		return false
+	var loot: Variant = chest.get("remaining_loot")
+	return loot is Dictionary and loot.keys() == ["health_potion", "rope"]
 
 
 func _make_deep_case(depth: int) -> Dictionary:
